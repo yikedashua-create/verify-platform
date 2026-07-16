@@ -1,0 +1,22 @@
+# Docker 忽略文件 - 加速构建
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv
+venv
+.env
+.pytest_cache
+.mypy_cache
+.ruff_cache
+dist
+build
+*.egg-info
+.DS_Store
+Thumbs.db
+*.log
+*.md
+!README.md
+_test_*.py
+verify_history.db

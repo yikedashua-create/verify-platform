@@ -1,0 +1,265 @@
+"""Streamlit 前端 - 客票验真平台"""
+import base64
+import os
+import streamlit as st
+import requests
+
+# API_BASE 优先从 Streamlit secrets 读 (线上部署用)
+# 本地默认 http://127.0.0.1:8002
+try:
+    API_BASE = st.secrets["api_base"]
+except (KeyError, FileNotFoundError):
+    API_BASE = os.environ.get("API_BASE", "http://127.0.0.1:8002")
+
+st.set_page_config(
+    page_title="客票验真平台",
+    page_icon="🎫",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# 自定义 CSS
+st.markdown("""
+<style>
+    .main-header {
+        background: linear-gradient(135deg, #1E88E5 0%, #1565C0 100%);
+        padding: 18px 28px;
+        border-radius: 12px;
+        margin-bottom: 18px;
+        color: white;
+        box-shadow: 0 2px 8px rgba(30, 136, 229, 0.2);
+    }
+    .main-header h1 { color: white !important; margin: 0; font-size: 26px; font-weight: 600; }
+    .main-header p { margin: 4px 0 0 0; opacity: 0.9; font-size: 13px; }
+    .badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+    .badge-success { background: #E8F5E9; color: #2E7D32; }
+    .badge-error { background: #FFEBEE; color: #C62828; }
+    .badge-warn { background: #FFF3E0; color: #E65100; }
+    .ticket-card {
+        padding: 12px;
+        border: 1px solid #E0E0E0;
+        border-radius: 8px;
+        background: #FAFAFA;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+@st.cache_data(ttl=60)
+def load_airlines():
+    try:
+        return requests.get(f"{API_BASE}/airlines", timeout=5).json()
+    except Exception as e:
+        st.error(f"连不上后端 {API_BASE}\n\n错误: {e}\n\n请先启 backend: `python backend/app.py`")
+        return []
+
+
+# 初始化 session state
+for key, default in {
+    "last_result": None,
+    "last_airline": None,
+    "last_form_data": None,
+    "last_tickets": [],
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+
+# 顶部 Header
+st.markdown("""
+<div class="main-header">
+    <h1>🎫 客票验真平台</h1>
+    <p>多航司客票验真 · 凭证生成</p>
+</div>
+""", unsafe_allow_html=True)
+
+airlines = load_airlines()
+if not airlines:
+    st.stop()
+
+
+# ============================================
+# 侧栏:仅航司选择
+# ============================================
+
+# 访问方式 -> 颜色 (业务标注)
+ACCESS_STYLES = {
+    "内网网关": ("#FF9800", "#FFF3E0"),  # 橙
+    "需登录": ("#9C27B0", "#F3E5F5"),    # 紫
+    "需登录态": ("#9C27B0", "#F3E5F5"),  # 紫
+    "公网 API": ("#2196F3", "#E3F2FD"),  # 蓝
+}
+
+with st.sidebar:
+    st.markdown("### ✈️ 航司")
+    code_to_name = {a["code"]: a for a in airlines}
+    selected_code = st.radio(
+        "航司列表",
+        options=list(code_to_name.keys()),
+        format_func=lambda c: f"{code_to_name[c]['name']} ({c.upper()})",
+        label_visibility="collapsed",
+    )
+    selected = code_to_name[selected_code]
+    acc = selected.get("access_type", "公网 API")
+    fg, bg = ACCESS_STYLES.get(acc, ("#666", "#F5F5F5"))
+    st.markdown(
+        f'<span class="access-tag" style="background:{bg};color:{fg};">● {acc}</span> '
+        f'{len(selected["form_fields"])} 个字段',
+        unsafe_allow_html=True,
+    )
+    st.divider()
+    st.caption(f"共 {len(airlines)} 个航司 · API: `{API_BASE}`")
+
+
+# ============================================
+# 主区
+# ============================================
+
+# 卡片 1: 查询表单
+with st.container(border=True):
+    # 标题 + 方式徽标 + (可选)官网验真按钮
+    acc = selected.get("access_type", "公网 API")
+    fg, bg = ACCESS_STYLES.get(acc, ("#666", "#F5F5F5"))
+    verify_url = selected.get("verify_url", "")
+
+    title_html = (
+        f'<span class="access-tag" style="background:{bg};color:{fg};">● {acc}</span> '
+        f'代码 `{selected["code"].upper()}`'
+    )
+    if verify_url:
+        title_md = f"#### 📋 {selected['name']}  \n{title_html}"
+    else:
+        title_md = f"#### 📋 {selected['name']}  \n{title_html}"
+    st.markdown(title_md, unsafe_allow_html=True)
+
+    # 官网验真按钮 (Streamlit 原生 link_button,点击新窗口打开)
+    if verify_url:
+        st.link_button(
+            "🌐 前往官网验真页面",
+            verify_url,
+            use_container_width=False,
+        )
+
+    form_data = {}
+    ncols = 2 if len(selected["form_fields"]) >= 4 else 1
+    cols = st.columns(ncols)
+    for idx, field in enumerate(selected["form_fields"]):
+        with cols[idx % ncols]:
+            label = f"{field['label']}{' *' if field['required'] else ''}"
+            ph = field.get("placeholder", "")
+            default = field.get("default", "")
+            unique_key = f"f_{field['name']}_{selected['code']}"
+            if field["field_type"] == "date":
+                form_data[field["name"]] = st.text_input(label, placeholder=ph or "YYYY-MM-DD", key=unique_key)
+            else:
+                form_data[field["name"]] = st.text_input(label, placeholder=ph, value=default, key=unique_key)
+
+    st.divider()
+    btn1, btn2, btn3 = st.columns([1, 1, 4])
+    with btn1:
+        submitted = st.button("🔍 查询", type="primary", use_container_width=True)
+    with btn2:
+        if st.button("🗑️ 清空", use_container_width=True, key="clear_form"):
+            for k in ["last_result", "last_airline", "last_form_data", "last_tickets"]:
+                st.session_state[k] = None if k != "last_tickets" else []
+            st.rerun()
+
+
+# 处理查询提交
+if submitted:
+    with st.spinner(f"正在查询 {selected['name']}..."):
+        try:
+            resp = requests.post(
+                f"{API_BASE}/verify/{selected['code']}",
+                json={"form_data": form_data},
+                timeout=70,
+            )
+            result = resp.json()
+        except Exception as e:
+            st.error(f"请求失败: {e}")
+            result = None
+
+    if result:
+        st.session_state.last_result = result
+        st.session_state.last_airline = selected["code"]
+        st.session_state.last_form_data = form_data
+        st.session_state.last_tickets = []
+
+
+# 卡片 2: 查询结果
+last = st.session_state.last_result
+last_airline = st.session_state.last_airline
+if last and last_airline == selected["code"]:
+    with st.container(border=True):
+        st.markdown("#### 📊 查询结果")
+        if last.get("success"):
+            st.markdown('<span class="badge badge-success">✅ 查询成功</span>', unsafe_allow_html=True)
+            st.code(last.get("data", ""), language="text")
+        else:
+            st.markdown('<span class="badge badge-error">❌ 查询失败</span>', unsafe_allow_html=True)
+            st.error(last.get("error", "未知错误"))
+            with st.expander("查看错误详情"):
+                st.code(last.get("traceback", ""), language="text")
+            with st.expander("🐛 调试 - 原始响应"):
+                st.json(last)
+
+    # 卡片 3: 生成凭证
+    if last.get("success"):
+        flight_info = last.get("flight_info", {})
+        with st.container(border=True):
+            st.markdown("#### 🧾 生成凭证")
+
+            if not flight_info:
+                st.markdown('<span class="badge badge-warn">⚠️ 无法生成</span>', unsafe_allow_html=True)
+                st.warning("查询结果里没有 flight_info,无法生成凭证")
+            else:
+                if st.button("🎫 一键生成凭证", type="primary"):
+                    with st.spinner("正在生成凭证..."):
+                        try:
+                            payload = {"airline": last_airline, "flight_info": flight_info}
+                            if last_airline == "mf":
+                                payload["flight_schedule"] = form_data.get("flightSchedule", "")
+
+                            resp = requests.post(
+                                f"{API_BASE}/ticket/generate",
+                                json=payload,
+                                timeout=60,
+                            )
+                            ticket_result = resp.json()
+                        except Exception as e:
+                            st.error(f"生成请求失败: {e}")
+                            ticket_result = None
+
+                    if ticket_result and ticket_result.get("success"):
+                        st.session_state.last_tickets = ticket_result.get("tickets", [])
+                        st.toast(f"✅ 已生成 {ticket_result.get('count', 0)} 张凭证", icon="🎫")
+                    elif ticket_result:
+                        st.error(f"❌ 生成失败: {ticket_result.get('error', '未知错误')}")
+                    else:
+                        st.error("❌ 无响应")
+
+                tickets = st.session_state.last_tickets
+                if tickets:
+                    st.markdown(f'<span class="badge badge-success">✅ 已生成 {len(tickets)} 张</span>', unsafe_allow_html=True)
+                    cols = st.columns(min(3, len(tickets)))
+                    for i, ticket in enumerate(tickets):
+                        with cols[i % len(cols)]:
+                            st.markdown('<div class="ticket-card">', unsafe_allow_html=True)
+                            st.markdown(f"**{ticket['pax_name']}**")
+                            st.caption(ticket["file_name"])
+                            if "png_base64" in ticket:
+                                st.image(
+                                    f"data:image/png;base64,{ticket['png_base64']}",
+                                    use_container_width=True,
+                                )
+                                st.download_button(
+                                    label="📥 下载凭证 PNG",
+                                    data=base64.b64decode(ticket["png_base64"]),
+                                    file_name=ticket["file_name"],
+                                    mime="image/png",
+                                    use_container_width=True,
+                                    key=f"dl_{i}_{ticket['file_name']}",
+                                )
+                            else:
+                                st.caption("(图片数据缺失)")
+                            st.markdown("</div>", unsafe_allow_html=True)
