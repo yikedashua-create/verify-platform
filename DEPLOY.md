@@ -1,107 +1,91 @@
-# 上线部署指南 (Streamlit Cloud + Render)
+# 部署指南
 
-## 架构
-
-```
-用户浏览器 ──→ Streamlit Cloud (前端) ──→ Render (后端 + Playwright)
-                       免费                     免费层
-```
-
-**前端**（Streamlit Cloud）—— 跑 `frontend/app.py`，从 secrets 读后端 URL
-**后端**（Render）—— 跑 `backend/app.py` + Playwright，用 Dockerfile build
+3 个推荐平台,按"易用性"排序。**首选 Hugging Face Spaces** —— 不要卡,5 分钟上线。
 
 ---
 
-## 步骤 1：推到 GitHub
+## 方案 1: Hugging Face Spaces(推荐 ⭐)
 
-```powershell
-cd C:\Users\admin\verify-platform
+免信用卡,永久 URL,Streamlit 原生支持。
 
-# 1.1 初始化 git
-git init
-git add .
-git commit -m "init: verify-platform"
+### 步骤
 
-# 1.2 在 github.com 创建一个新仓库 (名字随便,例如 verify-platform)
-#    不要勾选 README / .gitignore / license (本地已有)
+1. **登录 Hugging Face**
+   - 浏览器开 `https://huggingface.co`
+   - 右上角 **Sign in** → **Sign in with GitHub** → 授权你的 GitHub 账号
 
-# 1.3 推上去 (替换成你的 GitHub 用户名 + 仓库名)
-git remote add origin https://github.com/526147588-afk/verify-platform.git
-git branch -M main
-git push -u origin main
-```
+2. **创建 Space**
+   - 浏览器开 `https://huggingface.co/new-space`
+   - 填:
+     - **Owner**: 你的 GitHub username
+     - **Space name**: `verify-platform`
+     - **License**: MIT
+     - **SDK**: **Streamlit** ← 关键
+     - **Space hardware**: **CPU basic - free**
+   - 点 **Create Space**
 
----
+3. **推送代码到 Space**
+   - Space 创建后会给一个空 git 仓库:`https://huggingface.co/spaces/<owner>/verify-platform`
+   - 推送方式:在 Space 页面顶上 **Files** → **Add file** → **Upload files**(直接拖整个项目)
+   - 或者用 git 命令(SSH/HTTPS,凭据复用 GitHub 那把 SSH key)
 
-## 步骤 2：部署后端到 Render
+4. **等 build + 启动**
+   - Space 自动 build(2-5 分钟,装 Playwright 慢)
+   - 顶上状态变 **Running** 后,URL `https://<owner>-verify-platform.hf.space` 可访问
 
-1. 去 https://render.com 用 GitHub 登录
-2. **New +** → **Web Service**
-3. 选刚 push 的 `verify-platform` 仓库 → **Connect**
-4. 配置：
-   - **Name**: `verify-platform-api`（或随便）
-   - **Region**: Singapore（离大陆近）/ Oregon（免费层有时强制这里）
-   - **Branch**: `main`
-   - **Root Directory**: 留空
-   - **Runtime**: **Docker**
-   - **Dockerfile Path**: `Dockerfile`（自动）
-   - **Docker Context**: 留空
-   - **Plan**: **Free**
-5. **Advanced** → 加环境变量（可选）:
-   - `PYTHONUNBUFFERED=1` （日志更友好）
-6. 点 **Create Web Service**
-7. 等 5-10 分钟 build（Playwright + Chromium 下载）
-8. 部署成功后 Render 给你一个 URL，类似 `https://verify-platform-api.onrender.com`
+### 注意
 
-**测试后端**：
-- 浏览器开 `https://verify-platform-api.onrender.com/health` 应该看到 `{"status":"ok"}`
-- 浏览器开 `https://verify-platform-api.onrender.com/airlines` 应该看到 JSON
-
-⚠️ **冷启动警告**：Render 免费层 15 分钟无访问会休眠，下次访问要等 30-60 秒
+- **Playwright 在 Space 里需要 root**:`packages.txt` 加 chromium + fonts,`runtime.txt` 钉 Python 版本(可选,默认 3.11 OK)
+- **首次冷启动 30-60 秒**:Space free tier 闲置会休眠
 
 ---
 
-## 步骤 3：部署前端到 Streamlit Cloud
+## 方案 2: Railway(免信用卡,简单)
 
-1. 去 https://share.streamlit.io 用 GitHub 登录
-2. **New app**
-3. 配置：
-   - **Repository**: `526147588-afk/verify-platform`
-   - **Branch**: `main`
-   - **Main file path**: `frontend/app.py`
-   - **App URL**: 随便起个名字,如 `xu-zhe-verify`
-4. **Advanced settings** → **Secrets**:
-   ```toml
-   api_base = "https://verify-platform-api.onrender.com"
-   ```
-   ⚠️ **不要带尾部斜杠 /！不要带 `/verify` 之类！就是根 URL**
-5. 点 **Deploy**
-6. 等 2-5 分钟装依赖
-7. 完成后给你 URL，类似 `https://xu-zhe-verify.streamlit.app`
+跟 Render 体验类似,不用绑卡。$5/月免费额度,够一个轻量 Streamlit 跑满月。
 
----
+### 步骤
 
-## 步骤 4：测试
+1. **登录 Railway**
+   - 浏览器开 `https://railway.app`
+   - 右上角 **Login** → **Login with GitHub** → 授权
 
-- 浏览器开前端 URL，应该看到 15 个航司
-- 选个航司查票（**第一次要等 30-60 秒**，后端在冷启动）
-- 查成功后生成凭证 → 下载 PNG
+2. **新建项目**
+   - 顶 **+ New Project** → **Deploy from GitHub repo**
+   - 选 `<your-github>/verify-platform`
+   - Railway 自动检测 Dockerfile,开始 build
 
----
+3. **生成公网 URL**
+   - 进入 service → **Settings** 标签 → **Networking** 区域
+   - 点 **Generate Domain** → 拿到 `https://verify-platform.up.railway.app`
 
-## 改代码后怎么更新
+4. **等 build 完成**
+   - 顶上 Logs 标签看进度,Playwright 装 chromium 慢(2-5 分钟)
+   - 状态变 **Success** → 浏览器开 URL 验证
 
-- **前端**：推 GitHub → Streamlit Cloud 自动检测 commit → 1-2 分钟自动部署
-- **后端**：推 GitHub → Render 自动检测 commit → 3-5 分钟重新 build（要重下 Chromium 镜像层缓存，所以很快）
+### 注意
+
+- **5 美元额度耗完会停**:重置在每月 1 号(注册日起算)
+- **不要 commit secrets**:把任何 .env / secrets.toml 加进 .gitignore(已默认)
+- **首次冷启动 5-15 秒**:free tier 不像 HF 那样强制休眠
 
 ---
 
-## 排错
+## 方案 3: Render(要信用卡,跳过)
 
-| 现象 | 原因 | 解决 |
-|------|------|------|
-| Streamlit Cloud 页面空白 | secrets 配错 | Settings → Secrets 检查 `api_base` |
-| Streamlit Cloud `Connection refused` | 后端没部署 / Render URL 错 | 浏览器直接访问后端 URL 看是否 200 |
-| Render `Application failed to start` | Dockerfile 写错 | Render → Logs 看详细错误 |
-| 凭证生成慢 | Render 冷启动 | 第一次查后等 30-60s |
-| Streamlit Cloud `ModuleNotFoundError: playwright` | 前端不需要 playwright | 应该不出现,正常 |
+2023 年 4 月起强制绑卡验证(免费 plan 也要)。不推荐。
+
+---
+
+## 部署后验证
+
+1. 浏览器开 URL → 看到 **"🎫 客票验真平台"** 标题
+2. 侧栏航司列表应该有 **15 个**
+3. 选个航司(比如 HX 港航)→ 填测试数据 → 点 "查询"
+4. 等 5-10 秒 → 看到查询结果
+5. 如果有 flight_info,点 "一键生成凭证" → 下载 PNG
+
+**测试用例**(随便挑一个跑通就行):
+- HX 港航:票号 `123-4567890123` + 姓 `WONG` + 名 `TAI MAN`
+- 9C 春秋:任意订单号
+- MM 乐桃:任意票号(需要登录 token,先在 base.py 配)

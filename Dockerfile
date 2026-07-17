@@ -1,4 +1,5 @@
-# 客票验真平台 - 单容器部署 (后端 + 前端)
+# 客票验真平台 - Streamlit 单体部署
+# 一锅炖: Streamlit + 15 航司 adapter + Playwright,一个端口搞定
 FROM python:3.11-slim
 
 # Playwright 系统依赖
@@ -23,8 +24,12 @@ RUN playwright install chromium
 # 拷代码
 COPY . .
 
-# 暴露端口: 8002 后端 / 8501 前端
-EXPOSE 8002 8501
+# Streamlit 单端口 (Railway / Hugging Face / Streamlit Cloud 都默认 8501)
+EXPOSE 8501
 
-# 单容器同时跑后端 + 前端
-CMD ["sh", "-c", "python backend/app.py & streamlit run frontend/app.py --server.port=8501 --server.address=0.0.0.0 --server.headless=true --browser.gatherUsageStats=false"]
+# 跑 Streamlit 单体应用
+CMD ["streamlit", "run", "app.py", \
+     "--server.port=8501", \
+     "--server.address=0.0.0.0", \
+     "--server.headless=true", \
+     "--browser.gatherUsageStats=false"]

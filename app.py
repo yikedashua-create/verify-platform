@@ -1,15 +1,18 @@
-"""Streamlit 前端 - 客票验真平台"""
+"""客票验真平台 - Streamlit 单体应用
+
+内嵌 15 航司 adapter,直接调不绕 HTTP
+Streamlit 老手风格: 一锅炖,无 FastAPI
+"""
 import base64
+import sys
 import os
 import streamlit as st
-import requests
 
-# API_BASE 优先从 Streamlit secrets 读 (线上部署用)
-# 本地默认 http://127.0.0.1:8002
-try:
-    API_BASE = st.secrets["api_base"]
-except (KeyError, FileNotFoundError):
-    API_BASE = os.environ.get("API_BASE", "http://127.0.0.1:8002")
+# 让 app.py 能 import 同级 airlines/ 目录
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from airlines import get_adapter, list_airlines
+from airlines.ticket_generator import generate_ticket_images
 
 st.set_page_config(
     page_title="客票验真平台",
@@ -47,11 +50,8 @@ st.markdown("""
 
 @st.cache_data(ttl=60)
 def load_airlines():
-    try:
-        return requests.get(f"{API_BASE}/airlines", timeout=5).json()
-    except Exception as e:
-        st.error(f"连不上后端 {API_BASE}\n\n错误: {e}\n\n请先启 backend: `python backend/app.py`")
-        return []
+    """读 15 航司配置 (60s 缓存,新增航司重启才生效)"""
+    return list_airlines()
 
 
 # 初始化 session state
@@ -75,6 +75,7 @@ st.markdown("""
 
 airlines = load_airlines()
 if not airlines:
+    st.error("未找到任何航司配置,检查 airlines/__init__.py 的 REGISTRY")
     st.stop()
 
 
@@ -84,10 +85,10 @@ if not airlines:
 
 # 访问方式 -> 颜色 (业务标注)
 ACCESS_STYLES = {
-    "内网网关": ("#FF9800", "#FFF3E0"),  # 橙
-    "需登录": ("#9C27B0", "#F3E5F5"),    # 紫
-    "需登录态": ("#9C27B0", "#F3E5F5"),  # 紫
-    "公网 API": ("#2196F3", "#E3F2FD"),  # 蓝
+    "内网网关": ("#FF9800", "#FFF3E0"),
+    "需登录": ("#9C27B0", "#F3E5F5"),
+    "需登录态": ("#9C27B0", "#F3E5F5"),
+    "公网 API": ("#2196F3", "#E3F2FD"),
 }
 
 with st.sidebar:
@@ -108,7 +109,7 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.divider()
-    st.caption(f"共 {len(airlines)} 个航司 · API: `{API_BASE}`")
+    st.caption(f"共 {len(airlines)} 个航司")
 
 
 # ============================================
@@ -117,7 +118,6 @@ with st.sidebar:
 
 # 卡片 1: 查询表单
 with st.container(border=True):
-    # 标题 + 方式徽标 + (可选)官网验真按钮
     acc = selected.get("access_type", "公网 API")
     fg, bg = ACCESS_STYLES.get(acc, ("#666", "#F5F5F5"))
     verify_url = selected.get("verify_url", "")
@@ -132,7 +132,6 @@ with st.container(border=True):
         title_md = f"#### 📋 {selected['name']}  \n{title_html}"
     st.markdown(title_md, unsafe_allow_html=True)
 
-    # 官网验真按钮 (Streamlit 原生 link_button,点击新窗口打开)
     if verify_url:
         st.link_button(
             "🌐 前往官网验真页面",
@@ -165,25 +164,27 @@ with st.container(border=True):
             st.rerun()
 
 
-# 处理查询提交
+# 处理查询提交 (直接调 adapter,不绕 HTTP)
 if submitted:
     with st.spinner(f"正在查询 {selected['name']}..."):
-        try:
-            resp = requests.post(
-                f"{API_BASE}/verify/{selected['code']}",
-                json={"form_data": form_data},
-                timeout=70,
-            )
-            result = resp.json()
-        except Exception as e:
-            st.error(f"请求失败: {e}")
-            result = None
+        adapter = get_adapter(selected["code"])
+        if not adapter:
+            result = {"success": False, "error": f"航司 {selected['code']} 不存在"}
+        else:
+            try:
+                result = adapter.query(form_data)
+            except Exception as e:
+                import traceback
+                result = {
+                    "success": False,
+                    "error": str(e),
+                    "traceback": traceback.format_exc(),
+                }
 
-    if result:
-        st.session_state.last_result = result
-        st.session_state.last_airline = selected["code"]
-        st.session_state.last_form_data = form_data
-        st.session_state.last_tickets = []
+    st.session_state.last_result = result
+    st.session_state.last_airline = selected["code"]
+    st.session_state.last_form_data = form_data
+    st.session_state.last_tickets = []
 
 
 # 卡片 2: 查询结果
@@ -203,7 +204,7 @@ if last and last_airline == selected["code"]:
             with st.expander("🐛 调试 - 原始响应"):
                 st.json(last)
 
-    # 卡片 3: 生成凭证
+    # 卡片 3: 生成凭证 (直接调 generate_ticket_images,不绕 HTTP)
     if last.get("success"):
         flight_info = last.get("flight_info", {})
         with st.container(border=True):
@@ -216,19 +217,18 @@ if last and last_airline == selected["code"]:
                 if st.button("🎫 一键生成凭证", type="primary"):
                     with st.spinner("正在生成凭证..."):
                         try:
-                            payload = {"airline": last_airline, "flight_info": flight_info}
-                            if last_airline == "mf":
-                                payload["flight_schedule"] = form_data.get("flightSchedule", "")
-
-                            resp = requests.post(
-                                f"{API_BASE}/ticket/generate",
-                                json=payload,
-                                timeout=60,
+                            payload = {
+                                "airline_code": last_airline,
+                                "flight_info": flight_info,
+                                "flight_schedule": st.session_state.last_form_data.get("flightSchedule", ""),
+                            }
+                            ticket_result = generate_ticket_images(
+                                payload["airline_code"],
+                                payload["flight_info"],
+                                payload["flight_schedule"],
                             )
-                            ticket_result = resp.json()
                         except Exception as e:
-                            st.error(f"生成请求失败: {e}")
-                            ticket_result = None
+                            ticket_result = {"success": False, "error": str(e)}
 
                     if ticket_result and ticket_result.get("success"):
                         st.session_state.last_tickets = ticket_result.get("tickets", [])
