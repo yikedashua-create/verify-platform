@@ -5,7 +5,19 @@
 """
 OFFICIAL_VERIFY_URLS: dict = {
     "9c": "https://help.ch.com/Services/TravelList",
+    "gq": "https://www.skyexpress.gr/en",
     # 后续航司 URL 继续往下加
+    # "f9": "https://...",
+    # "ij": "https://...",
+    # "mm": "https://...",
+    # "sl": "https://...",
+    # "hx": "https://...",
+    # "mf": "https://...",
+    # "fr": "https://...",
+    # "vj": "https://...",
+    # "fy": "https://...",
+    # "aq": "https://...",
+    # "5j": "https://...",
     # "dd": "https://...",
     # "od": "https://...",
 }
