@@ -820,7 +820,7 @@ def generate_tickets(airline_code: str, flight_info: dict, flight_schedule: str 
                     pax_suffix = f"{surname}_{given_name}_{pax_idx+1}"
                 else:
                     pax_suffix = f"{surname}_{pax_idx+1}"
-                file_name = f"{safe_filename(eticket_no)}_{pax_suffix}.html"
+                file_name = f"{pax_suffix}.html"
 
                 tickets.append({
                     "file_name": file_name,
