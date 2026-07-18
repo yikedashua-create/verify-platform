@@ -111,44 +111,65 @@ def main():
     print(f"  App:    {APP_PATH}")
     print()
 
-    # 1. 准备 streamlit 运行环境
-    prepare_streamlit_env()
-
-    # 2. 启动后台更新检查
-    threading.Thread(target=check_update_in_background, daemon=True).start()
-
-    # 3. 启动后台线程:等 streamlit ready 后开浏览器
-    threading.Thread(target=open_browser_when_ready, daemon=True).start()
-
-    # 4. 配置 streamlit 命令行参数
-    sys.argv = [
-        "streamlit",
-        "run", str(APP_PATH),
-        "--server.port", str(PORT),
-        "--server.headless", "true",
-        "--server.address", "127.0.0.1",
-        "--browser.gatherUsageStats", "false",
-    ]
-    print(f"  [1/3] Starting Streamlit: streamlit run {APP_PATH.name}")
-    print(f"        port={PORT}, headless=true, address=127.0.0.1")
-    print()
-
-    # 5. 在 main 进程内直接调 streamlit CLI (同进程,不 spawn 子进程)
-    # 这一步会阻塞,直到 streamlit server 退出 (Ctrl+C / SIGTERM)
     try:
-        from streamlit.web import cli as stcli
-        stcli.main()
+        # 1. 准备 streamlit 运行环境
+        prepare_streamlit_env()
+
+        # 2. 启动后台更新检查
+        threading.Thread(target=check_update_in_background, daemon=True).start()
+
+        # 3. 启动后台线程:等 streamlit ready 后开浏览器
+        threading.Thread(target=open_browser_when_ready, daemon=True).start()
+
+        # 4. 配置 streamlit 命令行参数
+        sys.argv = [
+            "streamlit",
+            "run", str(APP_PATH),
+            "--server.port", str(PORT),
+            "--server.headless", "true",
+            "--server.address", "127.0.0.1",
+            "--browser.gatherUsageStats", "false",
+        ]
+        print(f"  [1/3] Starting Streamlit: streamlit run {APP_PATH.name}")
+        print(f"        port={PORT}, headless=true, address=127.0.0.1")
+        print()
+
+        # 5. 用 runpy.run_module 启 streamlit (PyInstaller 100% 兼容)
+        import runpy
+        runpy.run_module(
+            "streamlit",
+            run_name="__main__",
+            alternative_argv=sys.argv,
+        )
+
     except KeyboardInterrupt:
         print()
         print("  Received Ctrl+C, stopping ...")
     except SystemExit as e:
         # streamlit 退出时正常抛 SystemExit(0)
-        if e.code != 0:
+        if e.code not in (0, None):
             print(f"  Streamlit exited with code {e.code}")
     except Exception as e:
-        print(f"  [ERROR] Streamlit crashed: {e}")
+        # 把所有错误打印出来
         import traceback
+        print()
+        print("  " + "=" * 56)
+        print("  [ERROR] Streamlit failed to start")
+        print("  " + "=" * 56)
+        print(f"  Error: {e}")
+        print()
+        print("  Full traceback:")
+        print()
         traceback.print_exc()
+        print()
+        print("  " + "=" * 56)
+        print()
+
+    # 不论成功失败,等用户按 Enter 才退出(让用户看错误)
+    try:
+        input("  Press Enter to close this window...")
+    except (EOFError, KeyboardInterrupt):
+        pass
 
     print("  Goodbye.")
 
