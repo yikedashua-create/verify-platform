@@ -120,8 +120,40 @@ def main():
 
     print(f"  [3/3] Streamlit ready. Opening browser at {URL}")
 
-    # 4. 自动开浏览器
-    webbrowser.open(URL)
+    # 4. 自动开浏览器(多等几秒,Streamlit 起来慢)
+    print("  [3/3] Streamlit ready. Waiting 2 more sec, then opening browser ...")
+    time.sleep(2)
+
+    # 多重 fallback: Windows 用 os.startfile,其他用 webbrowser.open
+    browser_opened = False
+    if sys.platform == "win32":
+        try:
+            os.startfile(URL)  # Windows 专属,调默认浏览器,最稳
+            browser_opened = True
+            print("  [OK] Browser opened via os.startfile")
+        except Exception as e:
+            print(f"  [WARN] os.startfile failed: {e}")
+            try:
+                webbrowser.open(URL)
+                browser_opened = True
+                print("  [OK] Browser opened via webbrowser.open (fallback)")
+            except Exception as e2:
+                print(f"  [WARN] webbrowser.open also failed: {e2}")
+    else:
+        try:
+            webbrowser.open(URL)
+            browser_opened = True
+        except Exception:
+            pass
+
+    if not browser_opened:
+        print()
+        print("  ================================================")
+        print("  [!!] Could not auto-open browser.")
+        print(f"  Please manually open this URL in your browser:")
+        print(f"      {URL}")
+        print("  ================================================")
+        print()
 
     print()
     print("  Browser opened. The tool is ready to use.")
