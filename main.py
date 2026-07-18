@@ -1,17 +1,19 @@
 """客票验真平台 - 桌面端启动器
 
-被 PyInstaller 打成 .exe 后的入口:
-  1. 后台检查 GitHub Releases,有新版提示更新
-  2. 启 streamlit run app.py
-  3. 等 streamlit 起来后,自动开浏览器
-  4. 等用户关闭浏览器/退出后,关 streamlit
+PyInstaller .exe 入口:
+  1. 准备 sys.argv 调 streamlit.web.cli.main() (同进程内,不 spawn 子进程)
+  2. 后台线程等 streamlit ready 后,自动开浏览器
+  3. streamlit 退出时整个 .exe 退出
+
+⚠️ 不能用 subprocess.Popen([sys.executable, "-m", "streamlit" ...]):
+   PyInstaller onefile 模式下 sys.executable 指向 .exe 自己(不是 Python),
+   那样会 .exe 自递归,streamlit 永远起不来。
 """
 import os
 import sys
 import time
-import subprocess
-import webbrowser
 import threading
+import webbrowser
 from pathlib import Path
 
 
@@ -21,7 +23,6 @@ from pathlib import Path
 def get_bundle_dir() -> Path:
     """PyInstaller --onefile 解压的临时目录;开发模式为脚本所在目录"""
     if getattr(sys, "frozen", False):
-        # PyInstaller 解压目录 (_MEIPASS)
         return Path(getattr(sys, "_MEIPASS", os.path.dirname(sys.executable)))
     return Path(__file__).parent.resolve()
 
@@ -36,7 +37,6 @@ URL = f"http://127.0.0.1:{PORT}"
 # 后台检查更新
 # ============================================
 def check_update_in_background():
-    """启动一个 daemon 线程检查 GitHub 最新 release"""
     try:
         from auto_updater import check_and_notify
         check_and_notify()
@@ -45,39 +45,9 @@ def check_update_in_background():
 
 
 # ============================================
-# 启动 streamlit 子进程
-# ============================================
-def start_streamlit() -> subprocess.Popen:
-    """启 streamlit run app.py,返回子进程对象"""
-    cmd = [
-        sys.executable,        # .exe 自己(打包后) or python.exe (开发)
-        "-m", "streamlit", "run", str(APP_PATH),
-        "--server.port", str(PORT),
-        "--server.headless", "true",
-        "--server.address", "127.0.0.1",   # 仅本机访问 (单机软件)
-        "--browser.gatherUsageStats", "false",
-    ]
-
-    # Windows 隐藏 streamlit 的 console 窗口
-    creationflags = 0
-    if sys.platform == "win32":
-        # CREATE_NO_WINDOW = 0x08000000
-        creationflags = subprocess.CREATE_NO_WINDOW
-
-    # streamlit 写到 stdout (用户看不到,只看到 console 关闭)
-    return subprocess.Popen(
-        cmd,
-        creationflags=creationflags,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-
-# ============================================
 # 等 streamlit ready
 # ============================================
 def wait_for_streamlit(timeout: int = 30) -> bool:
-    """等 streamlit 在 8501 listen,最多等 timeout 秒"""
     import socket
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -89,95 +59,96 @@ def wait_for_streamlit(timeout: int = 30) -> bool:
     return False
 
 
+def open_browser_when_ready():
+    """后台线程:等 streamlit ready 后自动开浏览器"""
+    print("  [2/3] Waiting for Streamlit to be ready ...")
+    if not wait_for_streamlit(timeout=30):
+        print("  [ERROR] Streamlit did not start in 30 seconds.")
+        print("  Check console above for errors.")
+        return
+
+    print("  [3/3] Streamlit ready. Opening browser ...")
+    time.sleep(1.5)
+
+    # Windows 用 os.startfile (最稳)
+    if sys.platform == "win32":
+        try:
+            os.startfile(URL)
+            print(f"  [OK] Browser opened: {URL}")
+            return
+        except Exception as e:
+            print(f"  [WARN] os.startfile failed: {e}")
+
+    # 其他系统用 webbrowser
+    try:
+        webbrowser.open(URL)
+        print(f"  [OK] Browser opened: {URL}")
+    except Exception as e:
+        print(f"  [ERROR] Could not open browser: {e}")
+        print(f"  Please manually open: {URL}")
+
+
 # ============================================
-# 主流程
+# 准备 streamlit 启动环境
 # ============================================
+def prepare_streamlit_env():
+    """让 streamlit 找到自己的资源 (PyInstaller 解压目录)"""
+    if getattr(sys, "frozen", False):
+        # 让 cwd 切到解压目录,这样 streamlit 找到模板/静态文件
+        os.chdir(BUNDLE_DIR)
+        # 把解压目录加到 sys.path,这样 import 能找到
+        if str(BUNDLE_DIR) not in sys.path:
+            sys.path.insert(0, str(BUNDLE_DIR))
+
+
 def main():
     print("=" * 60)
     print("  Verify Platform  -  客票验真平台")
-    print("  v1.0.0  (c) 2026")
+    print(f"  v{os.environ.get('APP_VERSION', '1.0.0')}  (c) 2026")
     print("=" * 60)
     print()
     print(f"  Bundle: {BUNDLE_DIR}")
     print(f"  App:    {APP_PATH}")
     print()
 
-    # 1. 启动后台更新检查
+    # 1. 准备 streamlit 运行环境
+    prepare_streamlit_env()
+
+    # 2. 启动后台更新检查
     threading.Thread(target=check_update_in_background, daemon=True).start()
 
-    # 2. 启 streamlit
-    print(f"  [1/3] Starting Streamlit on port {PORT} ...")
-    proc = start_streamlit()
+    # 3. 启动后台线程:等 streamlit ready 后开浏览器
+    threading.Thread(target=open_browser_when_ready, daemon=True).start()
 
-    # 3. 等 streamlit 起来
-    print("  [2/3] Waiting for Streamlit to be ready ...")
-    if not wait_for_streamlit(timeout=30):
-        print("  [ERROR] Streamlit did not start in 30 seconds.")
-        print("  Check your Python + Streamlit installation.")
-        proc.terminate()
-        input("\n  Press Enter to exit...")
-        sys.exit(1)
-
-    print(f"  [3/3] Streamlit ready. Opening browser at {URL}")
-
-    # 4. 自动开浏览器(多等几秒,Streamlit 起来慢)
-    print("  [3/3] Streamlit ready. Waiting 2 more sec, then opening browser ...")
-    time.sleep(2)
-
-    # 多重 fallback: Windows 用 os.startfile,其他用 webbrowser.open
-    browser_opened = False
-    if sys.platform == "win32":
-        try:
-            os.startfile(URL)  # Windows 专属,调默认浏览器,最稳
-            browser_opened = True
-            print("  [OK] Browser opened via os.startfile")
-        except Exception as e:
-            print(f"  [WARN] os.startfile failed: {e}")
-            try:
-                webbrowser.open(URL)
-                browser_opened = True
-                print("  [OK] Browser opened via webbrowser.open (fallback)")
-            except Exception as e2:
-                print(f"  [WARN] webbrowser.open also failed: {e2}")
-    else:
-        try:
-            webbrowser.open(URL)
-            browser_opened = True
-        except Exception:
-            pass
-
-    if not browser_opened:
-        print()
-        print("  ================================================")
-        print("  [!!] Could not auto-open browser.")
-        print(f"  Please manually open this URL in your browser:")
-        print(f"      {URL}")
-        print("  ================================================")
-        print()
-
-    print()
-    print("  Browser opened. The tool is ready to use.")
-    print("  Close this window OR press Ctrl+C to stop the tool.")
+    # 4. 配置 streamlit 命令行参数
+    sys.argv = [
+        "streamlit",
+        "run", str(APP_PATH),
+        "--server.port", str(PORT),
+        "--server.headless", "true",
+        "--server.address", "127.0.0.1",
+        "--browser.gatherUsageStats", "false",
+    ]
+    print(f"  [1/3] Starting Streamlit: streamlit run {APP_PATH.name}")
+    print(f"        port={PORT}, headless=true, address=127.0.0.1")
     print()
 
-    # 5. 阻塞,等 streamlit 退出(用户关闭浏览器/手动 kill)
+    # 5. 在 main 进程内直接调 streamlit CLI (同进程,不 spawn 子进程)
+    # 这一步会阻塞,直到 streamlit server 退出 (Ctrl+C / SIGTERM)
     try:
-        # 用 poll() 周期检查,不让主进程阻塞在 wait()
-        while True:
-            retcode = proc.poll()
-            if retcode is not None:
-                # streamlit 子进程自己退出了
-                print(f"  Streamlit exited with code {retcode}.")
-                break
-            time.sleep(1)
+        from streamlit.web import cli as stcli
+        stcli.main()
     except KeyboardInterrupt:
         print()
-        print("  Stopping Streamlit ...")
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        print("  Received Ctrl+C, stopping ...")
+    except SystemExit as e:
+        # streamlit 退出时正常抛 SystemExit(0)
+        if e.code != 0:
+            print(f"  Streamlit exited with code {e.code}")
+    except Exception as e:
+        print(f"  [ERROR] Streamlit crashed: {e}")
+        import traceback
+        traceback.print_exc()
 
     print("  Goodbye.")
 
