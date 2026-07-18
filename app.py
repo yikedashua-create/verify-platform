@@ -21,6 +21,25 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# 自动更新提示(后台线程写到临时文件,这里读)
+try:
+    from auto_updater import read_update_info, clear_update_info
+    _update = read_update_info()
+except Exception:
+    _update = None
+if _update:
+    with st.sidebar.container(border=True):
+        st.markdown(f"### 🆕 新版本 v{_update['latest']} 可用")
+        st.caption(f"当前 v{_update.get('current', '?')} · 新版 {_update['size_mb']} MB")
+        st.link_button(
+            "⬇️ 立即下载新版本",
+            _update["url"],
+            use_container_width=True,
+        )
+        if st.button("忽略此版本", use_container_width=True, key="dismiss_update"):
+            clear_update_info()
+            st.rerun()
+
 # 自定义 CSS
 st.markdown("""
 <style>

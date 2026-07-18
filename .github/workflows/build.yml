@@ -1,0 +1,79 @@
+name: Build Windows .exe
+
+on:
+  push:
+    tags:
+      - 'v*'    # 推送 v1.0.0 tag 自动 build + 发 Release
+  workflow_dispatch:    # 手动触发(测试用)
+    inputs:
+      version:
+        description: 'Version tag (e.g. v1.0.1)'
+        required: false
+        default: 'manual'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Install Playwright chromium
+        run: |
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Build with PyInstaller
+        env:
+          APP_VERSION: ${{ github.ref_name }}
+        run: |
+          pyinstaller build.spec --clean --noconfirm
+
+      - name: Verify .exe exists
+        run: |
+          Get-Item dist/客票验真.exe
+          if ((Get-Item dist/客票验真.exe).Length -lt 50MB) {
+            Write-Error "Build size too small - probably failed"
+            exit 1
+          }
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/客票验真.exe
+          body: |
+            ## 客票验真平台 v${{ github.ref_name }}
+
+            [下载 客票验真.exe](./客票验真.exe) (Windows 10/11)
+
+            ### 安装方法
+            1. 下载 `客票验真.exe`
+            2. 双击运行,自动开浏览器
+            3. 第一次启动会装环境(约 1-2 分钟)
+            4. 后续启动秒开
+
+            ### 升级方法
+            重新下载新版 .exe 替换即可,自动检查更新也会提示。
+
+      - name: Upload artifact (manual build)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: 客票验真-${{ github.ref_name }}
+          path: dist/客票验真.exe
+          retention-days: 30
