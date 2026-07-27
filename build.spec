@@ -13,12 +13,32 @@ block_cipher = None
 # ============================
 # 数据文件收集
 # ============================
+# 0. app.py (Streamlit 入口,主入口 main.py 运行时用 runpy 调它)
+datas = [('app.py', '.')]
+
 # 1. 整个 airlines/ 目录
-datas = [('airlines', 'airlines')]
+datas.append(('airlines', 'airlines'))
 
 # 2. .streamlit 配置目录
 if Path('.streamlit').exists():
     datas.append(('.streamlit', '.streamlit'))
+
+# 3. streamlit 的 dist-info (importlib.metadata 需要!)
+# 否则 streamlit/version.py 调 importlib.metadata.version('streamlit') 会报错
+import glob
+for dist_info in glob.glob(r'D:\pycharm3\.venv\Lib\site-packages\streamlit-*.dist-info'):
+    target = os.path.basename(dist_info)
+    datas.append((dist_info, target))
+    print(f"  [spec] Including streamlit dist-info: {target}")
+
+# 4. 其他依赖的 dist-info (有些库也用 importlib.metadata)
+for pkg_name in ['altair', 'pandas', 'numpy', 'requests', 'urllib3', 'certifi', 'packaging', 'toml', 'Jinja2', 'MarkupSafe', 'pyarrow']:
+    matches = glob.glob(rf'D:\pycharm3\.venv\Lib\site-packages\{pkg_name}-*.dist-info')
+    for m in matches:
+        target = os.path.basename(m)
+        if not any(d[1] == target for d in datas):
+            datas.append((m, target))
+            print(f"  [spec] Including {target}")
 
 # 3. Playwright 浏览器二进制 (chromium + headless_shell + ffmpeg)
 # 路径: %LOCALAPPDATA%\ms-playwright\chromium-XXXX\chrome-win\
@@ -46,7 +66,25 @@ hiddenimports = [
     'streamlit',
     'streamlit.web',
     'streamlit.runtime',
+    'streamlit.runtime.scriptrunner',
+    'streamlit.runtime.scriptrunner.magic_funcs',
+    'streamlit.runtime.scriptrunner.exec_code',
+    'streamlit.runtime.scriptrunner.magic',
+    'streamlit.runtime.scriptrunner.script_cache',
+    'streamlit.runtime.scriptrunner.script_runner',
     'streamlit.components',
+    'uvicorn',  # streamlit 1.58+ web server 需要
+    'uvicorn.logging',
+    'uvicorn.loops',
+    'uvicorn.loops.auto',
+    'uvicorn.protocols',
+    'uvicorn.protocols.http',
+    'uvicorn.protocols.http.auto',
+    'uvicorn.protocols.websockets',
+    'uvicorn.protocols.websockets.auto',
+    'uvicorn.lifespan',
+    'uvicorn.lifespan.on',
+    'uvicorn.lifespan.off',
     'playwright',
     'playwright.sync_api',
     'requests',
@@ -81,6 +119,11 @@ hiddenimports = [
     'fnmatch',
     'platform',
     'ctypes',
+    'h11',
+    'sniffio',
+    'anyio',
+    'starlette',
+    'fastapi',  # streamlit 内部 web server 用
 ]
 
 # ============================
@@ -96,19 +139,38 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # 排除大库,减体积
-        'tkinter',
-        'test',
-        'unittest',
-        'pydoc',
-        'doctest',
-        'matplotlib',
+        # 排除大库 / 跟项目无关的库,加速 build + 减体积
+        # 只排除第三方库,别排除标准库(asyncio / concurrent / tkinter 等是必需的!)
+        # 大科学库(没装也别扫)
+        'tensorflow',
+        'torch',
+        'transformers',
+        'sklearn',
         'scipy',
         'sympy',
-        'pytest',
+        'matplotlib',
+        'plotly',
+        'pandas',  # 我们没直接用 pandas
+        'PIL',
+        'cv2',
         'IPython',
         'notebook',
         'jupyter',
+        'pytest',
+        'sphinx',
+        # 跟项目无关的库
+        'nltk',
+        'datasets',
+        'emoji',
+        'soundfile',
+        'librosa',
+        'pydantic',
+        'fastapi',
+        # ⚠️ 不能再 exclude uvicorn! streamlit 1.58+ 内部 web server 依赖它
+        # 之前排除导致 "ModuleNotFoundError: No module named 'uvicorn'"
+        'sqlalchemy',
+        'alembic',
+        'twisted',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -132,14 +194,14 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,            # 关掉 UPX 压缩 (return code -3 解压错误的根因)
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,         # 留 console 让用户看启动日志
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,            # 可以加 .ico 图标
+    icon=None,
 )

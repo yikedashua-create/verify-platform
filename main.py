@@ -122,25 +122,26 @@ def main():
         threading.Thread(target=open_browser_when_ready, daemon=True).start()
 
         # 4. 配置 streamlit 命令行参数
+        # ⚠️ streamlit 1.58+ PyInstaller freeze 模式默认开 global.developmentMode,
+        #    不接受 --server.port (会抛 RuntimeError) — 用默认 port 8501
+        # ⚠️ headless=true 必须保留(默认会尝试开浏览器,我们自己用 os.startfile)
+        # ⚠️ global.developmentMode=false 显式关掉,确保未来如果加上 server.port 不报错
         sys.argv = [
             "streamlit",
             "run", str(APP_PATH),
-            "--server.port", str(PORT),
             "--server.headless", "true",
-            "--server.address", "127.0.0.1",
             "--browser.gatherUsageStats", "false",
+            "--global.developmentMode", "false",
         ]
         print(f"  [1/3] Starting Streamlit: streamlit run {APP_PATH.name}")
-        print(f"        port={PORT}, headless=true, address=127.0.0.1")
+        print(f"        port={PORT} (default), headless=true")
         print()
 
-        # 5. 用 runpy.run_module 启 streamlit (PyInstaller 100% 兼容)
-        import runpy
-        runpy.run_module(
-            "streamlit",
-            run_name="__main__",
-            alternative_argv=sys.argv,
-        )
+        # 5. 直接调 streamlit.web.cli.main() 启 streamlit
+        # (不能用 runpy.run_module("streamlit", run_name="__main__"),
+        #  因为 PyInstaller 收集 streamlit 包时不会自动把 __main__.py 当入口)
+        from streamlit.web import cli as stcli
+        stcli.main()
 
     except KeyboardInterrupt:
         print()
