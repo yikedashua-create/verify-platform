@@ -1,7 +1,7 @@
 """MF 厦门航司适配器(2026-07-28 双模式升级)
 
 支持两种验真模式:
-- 模式 1 已知票号(原逻辑):调内网 API 172.18.247.238:32000/mf_app_verify
+- 模式 1 已知票号(原逻辑):调内网 API(URL 从环境变量 MF_INTERNAL_API_URL 读,不配则禁用)
 - 模式 2 只有订单号(2026-07-28 新增):调 xm_mf_verify 自动查票号 + 状态
 
 字段使用约定(前端用户填表时):
@@ -19,6 +19,10 @@
 - 默认: verify-platform/data/xm_mf_verify/accounts.db(跟 verify-platform 自己的数据放一起)
 - 可被环境变量 XM_MF_ACCOUNTS_DB / XM_MF_RESULTS_DB 覆盖
 - 首次部署:从 xm-mf-ticket-verify/data/accounts.db 拷过来能复用 cookie
+
+注意(2026-07-28 第四轮:公司内网 IP 不进代码):
+- 内网 API URL 不再硬编码在代码里,必须通过环境变量 MF_INTERNAL_API_URL 显式配置
+- 仓库 public,内网 IP 硬编码会泄露公司网络拓扑
 """
 import os
 import re
@@ -196,7 +200,10 @@ class MFAdapter(AirlineAdapter):
     code = "mf"
     name = "MF厦门航司"
     api_type = "custom"  # 双模式,前端按 custom 处理
-    api_url = "http://172.18.247.238:32000/mf_app_verify"  # 内网 API(模式 1 兜底)
+    # 2026-07-28 第四轮:内网 API URL 不再硬编码,必须通过环境变量 MF_INTERNAL_API_URL 显式配置
+    # 不配置 = 模式 1(已知票号)不可用,只能用模式 2(订单号自动验真)
+    # 仓库已 public,内网 IP 暴露会泄露公司网络拓扑
+    api_url = os.environ.get("MF_INTERNAL_API_URL", "").strip()
 
     # ⚠️ required 全 False:用户按情况选填模式
     # 业务约束(在 _call_api / _call_xm_mf_verify 里校验):
@@ -364,6 +371,12 @@ class MFAdapter(AirlineAdapter):
     # ============================================================
 
     def _call_internal_api(self, form_data: dict) -> dict:
+        # 2026-07-28 第四轮:模式 1 没配环境变量直接报错,不让 fallback 到公网 / 错的内网地址
+        if not self.api_url:
+            return {
+                "success": False,
+                "error": "内网 API 模式未启用:环境变量 MF_INTERNAL_API_URL 未配置。请用模式 2(订单号 + 账号手机)自动验真。",
+            }
         flight_schedule = form_data.get("flightSchedule", "").strip()
         payload = {
             "ticketNo": form_data.get("ticketNo", "").strip(),
