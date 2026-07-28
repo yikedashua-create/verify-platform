@@ -68,31 +68,40 @@ class LJAdapter(AirlineAdapter):
 
                 # Step 2: 找输入框 + 填表单
                 # 截图里输入框顺序: PNR / 姓 / 名 / 出发日期
-                # 字段选择器(从 Jin Air 页面结构推测,失败时看 _html 调整)
-                # 优先用 name 属性,fallback 用 placeholder
+                # 用 nth(0..3) 按位置填,简单粗暴
                 try:
-                    page.locator('input[placeholder*="预订号码"], input[name*="pnr"], input[name*="PNR"]').first.fill(pnr)
-                    page.locator('input[placeholder*="LAST NAME"], input[name*="lastName"], input[name*="family"]').first.fill(last_name)
-                    page.locator('input[placeholder*="FIRST NAME"], input[name*="firstName"], input[name*="given"]').first.fill(first_name)
-                    page.locator('input[placeholder*="出发日期"], input[type="date"], input[name*="depart"]').first.fill(depart_date)
+                    inputs = page.locator('input').all()
+                    input_count = len(inputs)
+                    result["_input_count"] = input_count  # 排查用
+
+                    if input_count < 4:
+                        result["_error"] = f"输入框数量不足(只找到 {input_count} 个,需要 4 个)"
+                        result["_html"] = page.content()[:3000]
+                        return result
+
+                    # 按截图顺序: PNR / 姓 / 名 / 日期
+                    inputs[0].fill(pnr, timeout=5000)
+                    inputs[1].fill(last_name, timeout=5000)
+                    inputs[2].fill(first_name, timeout=5000)
+                    # 日期输入框可能是 date 类型,直接 fill YYYY-MM-DD
+                    inputs[3].fill(depart_date, timeout=5000)
                 except Exception as e:
                     result["_error"] = f"填表失败: {type(e).__name__}: {e}"
-                    result["_html"] = page.content()[:2000]
+                    result["_html"] = page.content()[:3000]
                     return result
 
                 # Step 3: 点查询按钮
                 try:
                     # 截图里按钮是"查询"
-                    page.locator('button:has-text("查询"), button[type="submit"]').first.click()
+                    page.locator('button:has-text("查询"), button[type="submit"]').first.click(timeout=5000)
                     # 等结果加载
-                    page.wait_for_load_state("networkidle", timeout=self.timeout * 1000)
+                    page.wait_for_load_state("networkidle", timeout=15000)
                 except Exception as e:
                     result["_error"] = f"点查询按钮失败: {type(e).__name__}: {e}"
-                    result["_html"] = page.content()[:2000]
+                    result["_html"] = page.content()[:3000]
                     return result
 
-                # Step 4: 等结果页面(从截图看查完后跳到 /booking/manage?xxx 或类似)
-                # 多等一下,确保结果加载
+                # Step 4: 等结果页面
                 page.wait_for_timeout(2000)
 
                 html = page.content()
