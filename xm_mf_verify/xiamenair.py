@@ -48,9 +48,28 @@ STATUS_KEYWORDS = [
 ]
 
 # 登录成功的特征
+# 2026-07-28 加:"注销" / "白鹭俱乐部" / "您好," / "我的白鹭"(实际页面里这些比"我的订单"更常见)
+# 2026-07-28 加:booking 详情页的"客票号" / "OPEN_FOR_USE" / "订单单号"(verify_ticket 用 int-et 测 cookie)
 LOGIN_SUCCESS_MARKERS = [
-    "我的订单", "我的行程", "我的账户", "我的",
-    "退出", "退出登录", "头像", "个人中心",
+    "注销",
+    "退出",
+    "退出登录",
+    "您好,",
+    "白鹭俱乐部",
+    "我的白鹭",
+    "个人中心",
+    "我的订单",
+    "我的行程",
+    "我的账户",
+    "我的",
+    "头像",
+    # booking 页面特征(verify_ticket 4.1 步用 booking URL 测 cookie)
+    "客票号",
+    "OPEN_FOR_USE",
+    "FLOWN",
+    "REFUNDED",
+    "订单单号",
+    "PNR",
 ]
 
 # 登录失败的特征
@@ -175,11 +194,22 @@ def fill_credentials(page: Page, phone: str, password: str) -> bool:
     except PWTimeoutError:
         pass
 
-    # 1. 填手机号
+    # 1. 填手机号 — 2026-07-28 改:优先 OAuth2 input.account,fallback 通用 selector
     try:
-        page.locator(
-            "input[type='tel'], input[placeholder*='手机'], input[name*='phone']"
-        ).first.fill(phone)
+        phone_selectors = [
+            "input.account",  # 厦航 OAuth2
+            "input[alt*='手机号']",
+            "input[type='tel']",
+            "input[placeholder*='手机']",
+            "input[name*='phone']",
+        ]
+        for sel in phone_selectors:
+            el = page.locator(sel).first
+            if el.is_visible(timeout=500):
+                el.fill(phone)
+                break
+        else:
+            raise RuntimeError("所有 phone selector 都不可见")
     except Exception as e:
         logger.error(f"[login] 找不到手机号输入框: {e}")
         return False
@@ -187,7 +217,18 @@ def fill_credentials(page: Page, phone: str, password: str) -> bool:
     # 2. 填密码
     if password:
         try:
-            page.locator("input[type='password']").first.fill(password)
+            # 2026-07-28 改:厦航 input.password 跟通用 input[type='password'] 一起试
+            pwd_selectors = [
+                "input.password",  # 厦航 OAuth2
+                "input[type='password']",
+            ]
+            for sel in pwd_selectors:
+                el = page.locator(sel).first
+                if el.is_visible(timeout=500):
+                    el.fill(password)
+                    break
+            else:
+                raise RuntimeError("所有 password selector 都不可见")
         except Exception as e:
             logger.error(f"[login] 找不到密码输入框: {e}")
             return False
@@ -227,6 +268,13 @@ def ensure_login_form_visible(page: Page, max_wait_sec: int = 60) -> bool:
 
     # 1. 多种 selector 找登录表单(覆盖更多可能)
     form_selectors = [
+        # === 2026-07-28 加:OAuth2 登录表单(厦航 ecipuia.xiamenair.com)===
+        # 真实 HTML: <input class="account" placeholder="请输入白鹭卡号/..."> + <input class="password"> + <input class="code1">
+        "input.account",  # 手机号/白鹭卡号
+        "input.password",  # 密码
+        "input.code1",  # 验证码
+        "input.J_Captcha",  # 同上
+        # === 原有的:OTA 平台常见登录 ===
         "input[type='tel']",
         "input[name='username']",
         "input[name='mobile']",
@@ -240,13 +288,15 @@ def ensure_login_form_visible(page: Page, max_wait_sec: int = 60) -> bool:
     ]
 
     def _has_form() -> bool:
-        """检查任一登录表单 selector 是否可见"""
+        """检查任一登录表单 selector 是否可见(2026-07-28:timeout 300→2000 适应慢 JS 渲染)"""
         for sel in form_selectors:
             try:
                 el = page.locator(sel).first
-                if el.is_visible(timeout=300):
+                if el.is_visible(timeout=2000):
+                    logger.debug(f"[login] 找到登录表单(selector={sel!r})")
                     return True
-            except Exception:
+            except Exception as e:
+                logger.debug(f"[login] selector {sel!r} 失败: {type(e).__name__}")
                 continue
         return False
 
@@ -254,7 +304,18 @@ def ensure_login_form_visible(page: Page, max_wait_sec: int = 60) -> bool:
         logger.debug("[login] 登录表单已可见")
         return True
 
+    # 2026-07-28 加诊断:_has_form 全失败时,看 page.url + 几个关键 selector 状态
+    logger.warning(f"[login] _has_form 失败,page.url={page.url}")
+    for sel in form_selectors[:3]:
+        try:
+            el = page.locator(sel).first
+            count = page.locator(sel).count()
+            logger.warning(f"  selector {sel!r}: count={count}")
+        except Exception as e:
+            logger.warning(f"  selector {sel!r}: 异常 {e}")
+
     # 2. 尝试点"登录"按钮(主站首页 → 跳转 OAuth2)
+    # 2026-07-28 加:页面有 mask 元素挡住 header,需要 force=True 或先关掉 mask
     login_btn_selectors = [
         "header a:has-text('登录')",
         "nav a:has-text('登录')",
@@ -266,7 +327,17 @@ def ensure_login_form_visible(page: Page, max_wait_sec: int = 60) -> bool:
             btn = page.locator(sel).first
             if btn.is_visible(timeout=500):
                 logger.info(f"[login] 点'登录'按钮(selector: {sel!r})")
-                btn.click()
+                # 2026-07-28:先关掉 mask 元素(mask 是 home-footer 里的弹窗,会挡 header)
+                try:
+                    page.evaluate(
+                        "document.querySelectorAll('.mask').forEach(m => m.style.display='none')"
+                    )
+                except Exception:
+                    pass
+                try:
+                    btn.click(force=True)  # 强制点,即使被遮挡
+                except Exception:
+                    btn.click()
                 time.sleep(2)  # 等跳转
                 try:
                     page.wait_for_load_state("networkidle", timeout=8000)
@@ -630,16 +701,24 @@ def verify_ticket(
             storage_state = sm.load_storage_state()
             need_login = True
             if storage_state:
-                # 先访问订单详情(不是首页,避免被重定向到首页再访问多一次)
-                if cfg.xiamenair and cfg.xiamenair.booking_url_template:
+                # 2026-07-28 改:用 OAuth2 URL 测 cookie,不用 int-et booking URL
+                # 原因:int-et 域的 cookie 缺失,booking URL 会重定向到地区选择页,
+                #      is_login_success 检测不到已登录标志(白鹭俱乐部/注销),误判 cookie 失效
+                if cfg.xiamenair and cfg.xiamenair.login_url:
+                    test_url = cfg.xiamenair.login_url
+                elif cfg.xiamenair and cfg.xiamenair.booking_url_template:
                     test_url = cfg.xiamenair.booking_url_template.format(order_no=order_no)
                 else:
                     test_url = "https://www.xiamenair.com/"
                 try:
                     page.goto(test_url, wait_until="domcontentloaded", timeout=30000)
                     time.sleep(2)
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=8000)
+                    except PWTimeoutError:
+                        pass
                 except Exception as e:
-                    logger.info(f"[verify] 访问订单详情失败,可能要登录: {e}")
+                    logger.info(f"[verify] 访问 OAuth2 URL 失败,可能要登录: {e}")
 
                 if is_login_success(page):
                     logger.info(f"[verify] 账号 {account_phone} cookie 仍有效,跳过登录")

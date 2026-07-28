@@ -26,9 +26,10 @@ from .base import AirlineAdapter, FormField
 
 
 # 让 mf.py 能 import 同级目录的 xm_mf_verify/(项目根/下)
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent  # 2026-07-28 改为 Path(原是 str)
+_PROJECT_ROOT_STR = str(_PROJECT_ROOT)  # sys.path 要 str
+if _PROJECT_ROOT_STR not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT_STR)
 
 
 # ============================================================
@@ -55,9 +56,52 @@ except Exception as _e:  # 首次部署可能 xm_mf_verify 还没装好
 
 
 def _get_password_for_phone(phone: str) -> str:
-    """从环境变量读白鹭会员密码(约定 XM_MF_PWD_<phone>)"""
+    """读白鹭会员密码(2026-07-28 升级:多源)
+
+    优先级:
+    1. Streamlit secrets(.streamlit/secrets.toml 的 [mf_accounts] 段,推荐,一次配置长期用)
+    2. 直接读 .streamlit/secrets.toml(非 streamlit 上下文也能读)
+    3. 环境变量 XM_MF_PWD_<phone>(兼容老用法)
+
+    配置示例(.streamlit/secrets.toml):
+        [mf_accounts]
+        "16673220623" = "hmling33*"
+        "13800138000" = "another_pwd"
+    """
     if not phone:
         return ""
+
+    # 1. 优先:Streamlit secrets(在 Streamlit 上下文里)
+    try:
+        import streamlit as st
+        mf_secrets = st.secrets.get("mf_accounts", {})
+        pwd = mf_secrets.get(phone, "")
+        if pwd:
+            return str(pwd)
+    except Exception:
+        pass
+
+    # 2. 兜底:直接读 secrets.toml(非 Streamlit 上下文也能用)
+    try:
+        import tomllib  # py 3.11+
+    except ImportError:
+        try:
+            import tomli as tomllib  # py <3.11
+        except ImportError:
+            tomllib = None  # noqa
+    if tomllib is not None:
+        secrets_path = _PROJECT_ROOT / ".streamlit" / "secrets.toml"
+        if secrets_path.exists():
+            try:
+                with open(secrets_path, "rb") as f:
+                    data = tomllib.load(f)
+                pwd = (data.get("mf_accounts") or {}).get(phone, "")
+                if pwd:
+                    return str(pwd)
+            except Exception:
+                pass
+
+    # 3. 兜底:环境变量 XM_MF_PWD_<phone>
     env_key = f"XM_MF_PWD_{phone}"
     return os.environ.get(env_key, "")
 
