@@ -1,0 +1,40 @@
+# 排除不需要打进 image 的文件(.dockerignore 类似 .gitignore)
+
+# === 敏感数据(绝不入 image)===
+.streamlit/secrets.toml
+*.db
+data/
+
+# === Python 缓存 ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+*.pyo
+
+# === 虚拟环境 ===
+.venv/
+venv/
+env/
+
+# === IDE / 编辑器 ===
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === 临时调试文件(本地测试用过)===
+_test_*.py
+_test_*.txt
+*.log
+*.tmp
+
+# === 操作系统 ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === 项目文档(可选,大) ===
+# AGENTS.md
+# *.md
+# 但 README.md / DEPLOY.md 留着方便运维

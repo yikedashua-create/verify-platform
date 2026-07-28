@@ -76,14 +76,47 @@ except Exception as _e:
 # ============================================================
 
 def _get_password_for_phone(phone: str) -> str:
-    """从 .streamlit/secrets.toml 读白鹭会员密码(2026-07-28 第三轮)
+    """读白鹭会员密码(2026-07-28 第四轮:Railway 部署支持)
+
+    优先级(2026-07-28 第四轮):
+    1. 环境变量 MF_PASSWORDS_JSON(JSON dict,key=phone, value=pwd)
+       推荐用于 Railway 部署,一个 env var 管所有账号
+    2. 环境变量 XM_MF_PWD_<phone>(每个账号一个 env var,兼容老用法)
+    3. .streamlit/secrets.toml 里 [mf_accounts] 段(本地开发推荐)
+       自动写入(2026-07-28 第三轮):前端表单传入的密码,登录成功会写回
 
     配置示例:
-        [mf_accounts]
-        "16673220623" = "hmling33*"
-        "13800138000" = "another_pwd"
+        # 方式 1:JSON 环境变量(Railway 推荐)
+        MF_PASSWORDS_JSON='{"16673220623": "hmling33*", "13800138000": "another_pwd"}'
+
+        # 方式 2:本地 secrets.toml
+        # .streamlit/secrets.toml:
+        #   [mf_accounts]
+        #   "16673220623" = "hmling33*"
     """
-    if not phone or tomllib is None:
+    if not phone:
+        return ""
+
+    # 1. 优先:环境变量 MF_PASSWORDS_JSON(JSON dict,2026-07-28 加,适合 Railway 部署)
+    try:
+        import json
+        mf_passwords_json = os.environ.get("MF_PASSWORDS_JSON", "")
+        if mf_passwords_json:
+            mf_passwords = json.loads(mf_passwords_json)
+            pwd = mf_passwords.get(phone, "")
+            if pwd:
+                return str(pwd)
+    except Exception:
+        pass
+
+    # 2. 兜底:环境变量 XM_MF_PWD_<phone>(每个账号一个)
+    env_key = f"XM_MF_PWD_{phone}"
+    env_pwd = os.environ.get(env_key, "")
+    if env_pwd:
+        return env_pwd
+
+    # 3. 兜底:.streamlit/secrets.toml 文件
+    if tomllib is None:
         return ""
     if not _SECRETS_PATH.exists():
         return ""
