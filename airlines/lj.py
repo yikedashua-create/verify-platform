@@ -66,6 +66,19 @@ class LJAdapter(AirlineAdapter):
                 # 等 JS 加载完(Cloudflare 验证通常 3-5s)
                 page.wait_for_load_state("networkidle", timeout=self.timeout * 1000)
 
+                # Cloudflare challenge 完后表单才渲染,轮询等 input 数 >= 4
+                # 最多等 30s,每 1s 查一次
+                import time
+                max_wait = 30
+                waited = 0
+                while waited < max_wait:
+                    current_count = len(page.locator('input').all())
+                    if current_count >= 4:
+                        break
+                    page.wait_for_timeout(1000)
+                    waited += 1
+                result["_cf_wait_seconds"] = waited  # 排查用
+
                 # Step 2: 找输入框 + 填表单
                 # 截图里输入框顺序: PNR / 姓 / 名 / 出发日期
                 # 用 nth(0..3) 按位置填,简单粗暴
