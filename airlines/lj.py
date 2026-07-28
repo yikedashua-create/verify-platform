@@ -1,24 +1,21 @@
-"""LJ Jin Air 韩国真航空适配器(2026-07-28 新增)
+"""LJ Jin Air 韩国真航空适配器(2026-07-28 第二版:换 Playwright)
 
 查票方式: PNR + 姓 + 名 + 出发日期
 - URL: https://www.jinair.com/booking/index
-- 走 cloudscraper 绕过 Cloudflare 反爬
-- 表单 POST 提交,返回 HTML,正则提取
+- Cloudflare 反爬,cloudscraper/curl_cffi 都过不了,改用 Playwright 真实浏览器
+- 2026-07-28 第一版用 cloudscraper,被 Cloudflare 403,换 Playwright
 """
 import re
-import cloudscraper
-import urllib3
+import json
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 from .base import AirlineAdapter, FormField
-
-# 关掉 verify=False 的 warning
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class LJAdapter(AirlineAdapter):
     code = "lj"
     name = "LJ真航空"
-    api_type = "simple_post"  # 公网 POST(用 cloudscraper 绕 Cloudflare)
+    api_type = "custom"  # 用 Playwright 不属于 4 种标准类型,标 custom
     api_url = "https://www.jinair.com/booking/index"
 
     form_fields = [
@@ -37,93 +34,119 @@ class LJAdapter(AirlineAdapter):
         if not pnr or not last_name or not first_name or not depart_date:
             return {"_error": "请填写完整的预订号码 / 姓 / 名 / 出发日期"}
 
-        # cloudscraper 自带 Cloudflare 绕过能力
-        scraper = cloudscraper.create_scraper(
-            browser={
-                "browser": "chrome",
-                "platform": "windows",
-                "desktop": True,
-            }
-        )
+        # 把 YYYY-MM-DD 转为页面需要的格式(截图里是 YYYY.MM.DD)
+        depart_date_dotted = depart_date.replace("-", ".")
 
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Referer": "https://www.jinair.com/booking/index",
-            "Origin": "https://www.jinair.com",
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
-
-        # Step 1: GET booking/index 拿 cookie + cf_clearance
-        try:
-            init_resp = scraper.get(
-                "https://www.jinair.com/booking/index",
-                headers=headers,
-                timeout=self.timeout,
-            )
-            init_resp.raise_for_status()
-        except Exception as e:
-            return {"_error": f"GET booking/index 失败: {type(e).__name__}: {e}"}
-
-        # Step 2: POST 表单提交查询
-        # 注: 字段名要根据实际页面表单调整,这里先按猜测
-        payload = {
-            "pnr": pnr,
-            "lastName": last_name,
-            "firstName": first_name,
-            "departDate": depart_date,
-        }
-
-        try:
-            search_resp = scraper.post(
-                self.api_url,
-                data=payload,
-                headers=headers,
-                timeout=self.timeout,
-                allow_redirects=True,
-            )
-            search_resp.raise_for_status()
-        except Exception as e:
-            return {"_error": f"POST 查票失败: {type(e).__name__}: {e}"}
-
-        text = search_resp.text
-
-        # Step 3: 正则提取关键信息(从截图看,Jin Air 查票结果页含预订状态、航班号、乘客等)
         result = {
-            "_html": text,  # 保留原始 HTML,失败时排查用
             "pnr": pnr,
             "lastName": last_name,
             "firstName": first_name,
             "departDate": depart_date,
+            "_html": "",
+            "_method": "",
         }
 
-        # 提取预订状态(中文"确定"=已确认 / "已出票" / "未出票" 等)
-        # 截图里: 预订状态 = "确定"
-        status_match = re.search(r"预订状态[\s\S]{0,30}?([\u4e00-\u9fa5A-Z]+)", text)
-        if status_match:
-            result["status"] = status_match.group(1).strip()
+        with sync_playwright() as p:
+            # headless=True 部署到 Railway 必须,Dockerfile 已装 chromium
+            browser = p.chromium.launch(headless=True)
+            try:
+                context = browser.new_context(
+                    viewport={"width": 1280, "height": 720},
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    locale="zh-CN",
+                )
+                page = context.new_page()
 
-        # 提取航班号(LJ + 数字)
-        flight_match = re.search(r"\b(LJ\s*\d{2,4})\b", text)
-        if flight_match:
-            result["flightNo"] = flight_match.group(1).replace(" ", "")
+                # Step 1: GET booking/index(过 Cloudflare 验证 + 拿页面)
+                page.goto(self.api_url, wait_until="domcontentloaded", timeout=self.timeout * 1000)
+                # 等 JS 加载完(Cloudflare 验证通常 3-5s)
+                page.wait_for_load_state("networkidle", timeout=self.timeout * 1000)
 
-        # 提取乘客信息(姓/名)
-        pax_match = re.search(r"姓名[\s\S]{0,30}?([A-Z]+/[A-Z]+)", text)
-        if pax_match:
-            result["passenger"] = pax_match.group(1)
+                # Step 2: 找输入框 + 填表单
+                # 截图里输入框顺序: PNR / 姓 / 名 / 出发日期
+                # 字段选择器(从 Jin Air 页面结构推测,失败时看 _html 调整)
+                # 优先用 name 属性,fallback 用 placeholder
+                try:
+                    page.locator('input[placeholder*="预订号码"], input[name*="pnr"], input[name*="PNR"]').first.fill(pnr)
+                    page.locator('input[placeholder*="LAST NAME"], input[name*="lastName"], input[name*="family"]').first.fill(last_name)
+                    page.locator('input[placeholder*="FIRST NAME"], input[name*="firstName"], input[name*="given"]').first.fill(first_name)
+                    page.locator('input[placeholder*="出发日期"], input[type="date"], input[name*="depart"]').first.fill(depart_date)
+                except Exception as e:
+                    result["_error"] = f"填表失败: {type(e).__name__}: {e}"
+                    result["_html"] = page.content()[:2000]
+                    return result
 
-        # 提取行程(出发机场 → 到达机场)
-        route_match = re.search(r"([A-Z]{3,4})\s*[\u4e00-\u9fa5]+\s*[→\->]+\s*([A-Z]{3,4})", text)
-        if route_match:
-            result["from"] = route_match.group(1)
-            result["to"] = route_match.group(2)
+                # Step 3: 点查询按钮
+                try:
+                    # 截图里按钮是"查询"
+                    page.locator('button:has-text("查询"), button[type="submit"]').first.click()
+                    # 等结果加载
+                    page.wait_for_load_state("networkidle", timeout=self.timeout * 1000)
+                except Exception as e:
+                    result["_error"] = f"点查询按钮失败: {type(e).__name__}: {e}"
+                    result["_html"] = page.content()[:2000]
+                    return result
 
-        return result
+                # Step 4: 等结果页面(从截图看查完后跳到 /booking/manage?xxx 或类似)
+                # 多等一下,确保结果加载
+                page.wait_for_timeout(2000)
+
+                html = page.content()
+                result["_html"] = html[:5000]  # 截 5000 字符,排查用
+                result["_url"] = page.url
+
+                # Step 5: 提取关键信息
+                # 预订状态(中文"确定"=已确认)
+                status_match = re.search(r"预订状态[\s\S]{0,30}?([\u4e00-\u9fa5]{1,6})", html)
+                if status_match:
+                    result["status"] = status_match.group(1).strip()
+
+                # 航班号(LJ + 数字)
+                flight_match = re.search(r"\b(LJ\s*\d{2,4})\b", html)
+                if flight_match:
+                    result["flightNo"] = flight_match.group(1).replace(" ", "")
+
+                # 乘客姓名
+                pax_match = re.search(r"姓名[\s\S]{0,30}?([A-Z]+/[A-Z]+)", html)
+                if pax_match:
+                    result["passenger"] = pax_match.group(1)
+
+                # 行程
+                route_match = re.search(r"([A-Z]{3,4})\s+([\u4e00-\u9fa5]+)\s*([→\->]+)\s*([A-Z]{3,4})", html)
+                if route_match:
+                    result["from"] = route_match.group(1)
+                    result["fromCity"] = route_match.group(2)
+                    result["to"] = route_match.group(4)
+
+                # 出发时间(HH:MM)
+                time_match = re.search(r"(\d{2}:\d{2})\s*[\u4e00-\u9fa5]+\s*(\d{2}:\d{2})", html)
+                if time_match:
+                    result["departTime"] = time_match.group(1)
+                    result["arriveTime"] = time_match.group(2)
+
+                return result
+            except PlaywrightTimeout as e:
+                result["_error"] = f"Playwright 超时: {type(e).__name__}: {e}"
+                try:
+                    result["_html"] = page.content()[:2000]
+                except Exception:
+                    pass
+                return result
+            except Exception as e:
+                result["_error"] = f"Playwright 错误: {type(e).__name__}: {e}"
+                try:
+                    result["_html"] = page.content()[:2000]
+                except Exception:
+                    pass
+                return result
+            finally:
+                browser.close()
 
     def _parse(self, raw) -> dict:
-        # raw 可能是 dict(成功) 或 {"_error": "..."}(失败)
         if isinstance(raw, dict) and raw.get("_error"):
             return {"success": False, "error": raw["_error"]}
 
@@ -147,19 +170,19 @@ class LJAdapter(AirlineAdapter):
                 output.append("【乘客信息】")
                 output.append(f"姓名: {raw.get('passenger')}")
 
-            if raw.get("from") and raw.get("to"):
+            if raw.get("flightNo"):
                 output.append("")
                 output.append("【行程信息】")
-                output.append(f"航线: {raw.get('from')} → {raw.get('to')}")
-                if raw.get("flightNo"):
-                    output.append(f"航班号: {raw.get('flightNo')}")
+                if raw.get("from") and raw.get("to"):
+                    output.append(f"航线: {raw.get('from')} → {raw.get('to')}")
+                output.append(f"航班号: {raw.get('flightNo')}")
+                if raw.get("departTime") and raw.get("arriveTime"):
+                    output.append(f"时间: {raw.get('departTime')} → {raw.get('arriveTime')}")
 
+            # 原始 HTML(失败排查用)
             output.append("")
-            output.append("【原始 HTML 片段(排查用)】")
-            html = raw.get("_html", "")
-            if html:
-                # 输出关键片段
-                output.append(html[:500] + ("..." if len(html) > 500 else ""))
+            output.append("【URL】")
+            output.append(raw.get("_url", "N/A"))
 
             return {
                 "success": True,
