@@ -9,8 +9,11 @@
 - 没填 orderNo,只填了 ticketNo → 走模式 1(内网 API)
 - 两个都填 → 优先模式 2(自动验真)
 
-密码走环境变量 XM_MF_PWD_<phone> 设置,不进 API/DB
-例: set XM_MF_PWD_16673220623=hmling33*
+密码管理(2026-07-28 第三轮升级:输入即存):
+- 优先级: 1) 前端表单 password 字段(临时)  2) .streamlit/secrets.toml  3) 环境变量
+- 登录成功后,前端传入的密码自动写入 secrets.toml(以后免输入)
+- 首次配新账号:前端填一次,自动保存
+- 改密码:前端填新密码,自动覆盖 secrets.toml
 
 数据目录(2026-07-28 新增):
 - 默认: verify-platform/data/xm_mf_verify/accounts.db(跟 verify-platform 自己的数据放一起)
@@ -18,6 +21,7 @@
 - 首次部署:从 xm-mf-ticket-verify/data/accounts.db 拷过来能复用 cookie
 """
 import os
+import re
 import sys
 import requests
 import traceback
@@ -26,8 +30,8 @@ from .base import AirlineAdapter, FormField
 
 
 # 让 mf.py 能 import 同级目录的 xm_mf_verify/(项目根/下)
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent  # 2026-07-28 改为 Path(原是 str)
-_PROJECT_ROOT_STR = str(_PROJECT_ROOT)  # sys.path 要 str
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PROJECT_ROOT_STR = str(_PROJECT_ROOT)
 if _PROJECT_ROOT_STR not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT_STR)
 
@@ -47,63 +51,112 @@ _MF_RESULTS_DB = os.environ.get(
     "XM_MF_RESULTS_DB", str(_MF_DATA_DIR / "verify_results.db")
 )
 
+# secrets.toml 路径
+_SECRETS_PATH = _PROJECT_ROOT / ".streamlit" / "secrets.toml"
+
+# tomllib 兼容性(Python 3.11+ 有,3.10 及以下用 tomli)
+try:
+    import tomllib  # py 3.11+
+except ImportError:
+    try:
+        import tomli as tomllib  # py <3.11
+    except ImportError:
+        tomllib = None  # 极端情况,所有 tomllib 都不可用
+
 # 初始化 DB schema(Streamlit reload 时也会重跑,init_all 内部幂等)
 try:
     from xm_mf_verify.db import init_all
     init_all(_MF_ACCOUNTS_DB, _MF_RESULTS_DB)
-except Exception as _e:  # 首次部署可能 xm_mf_verify 还没装好
+except Exception as _e:
     print(f"[mf.py] 警告:init xm_mf_verify DB 失败: {_e}")
 
 
+# ============================================================
+# 密码管理(2026-07-28 第三轮:输入即存)
+# ============================================================
+
 def _get_password_for_phone(phone: str) -> str:
-    """读白鹭会员密码(2026-07-28 升级:多源)
+    """从 .streamlit/secrets.toml 读白鹭会员密码(2026-07-28 第三轮)
 
-    优先级:
-    1. Streamlit secrets(.streamlit/secrets.toml 的 [mf_accounts] 段,推荐,一次配置长期用)
-    2. 直接读 .streamlit/secrets.toml(非 streamlit 上下文也能读)
-    3. 环境变量 XM_MF_PWD_<phone>(兼容老用法)
-
-    配置示例(.streamlit/secrets.toml):
+    配置示例:
         [mf_accounts]
         "16673220623" = "hmling33*"
         "13800138000" = "another_pwd"
     """
-    if not phone:
+    if not phone or tomllib is None:
+        return ""
+    if not _SECRETS_PATH.exists():
+        return ""
+    try:
+        with open(_SECRETS_PATH, "rb") as f:
+            data = tomllib.load(f)
+        return str((data.get("mf_accounts") or {}).get(phone, ""))
+    except Exception:
         return ""
 
-    # 1. 优先:Streamlit secrets(在 Streamlit 上下文里)
-    try:
-        import streamlit as st
-        mf_secrets = st.secrets.get("mf_accounts", {})
-        pwd = mf_secrets.get(phone, "")
-        if pwd:
-            return str(pwd)
-    except Exception:
-        pass
 
-    # 2. 兜底:直接读 secrets.toml(非 Streamlit 上下文也能用)
-    try:
-        import tomllib  # py 3.11+
-    except ImportError:
+def _save_password_for_phone(phone: str, password: str) -> bool:
+    """保存白鹭会员密码到 .streamlit/secrets.toml(2026-07-28 新增)
+
+    行为:
+    - 读现有 secrets.toml(用 tomllib)
+    - 更新 [mf_accounts] 段
+    - 重写整个 [mf_accounts] 段(其它段原样保留)
+    - 写回
+
+    Returns: True 成功, False 失败
+    """
+    if not phone or not password or tomllib is None:
+        return False
+
+    # 1. 读现有(拿到 mf_accounts dict)
+    existing_text = ""
+    mf_accounts = {}
+    if _SECRETS_PATH.exists():
         try:
-            import tomli as tomllib  # py <3.11
-        except ImportError:
-            tomllib = None  # noqa
-    if tomllib is not None:
-        secrets_path = _PROJECT_ROOT / ".streamlit" / "secrets.toml"
-        if secrets_path.exists():
-            try:
-                with open(secrets_path, "rb") as f:
-                    data = tomllib.load(f)
-                pwd = (data.get("mf_accounts") or {}).get(phone, "")
-                if pwd:
-                    return str(pwd)
-            except Exception:
-                pass
+            existing_text = _SECRETS_PATH.read_text(encoding="utf-8")
+        except Exception:
+            pass
+        try:
+            with open(_SECRETS_PATH, "rb") as f:
+                existing = tomllib.load(f)
+            mf_accounts = dict(existing.get("mf_accounts") or {})
+        except Exception:
+            pass  # 文件格式坏了,就当作空
 
-    # 3. 兜底:环境变量 XM_MF_PWD_<phone>
-    env_key = f"XM_MF_PWD_{phone}"
-    return os.environ.get(env_key, "")
+    # 2. 更新
+    mf_accounts[phone] = password
+
+    # 3. 生成新的 [mf_accounts] 段
+    new_section_lines = ["[mf_accounts]"]
+    for k, v in sorted(mf_accounts.items()):
+        # 转义反斜杠和双引号(密码可能有 *)
+        escaped_v = str(v).replace("\\", "\\\\").replace('"', '\\"')
+        new_section_lines.append(f'"{k}" = "{escaped_v}"')
+    new_section = "\n".join(new_section_lines) + "\n"
+
+    # 4. 替换 / 追加 [mf_accounts] 段
+    pattern = re.compile(r"\[mf_accounts\][^\[]*", re.DOTALL)
+    if pattern.search(existing_text):
+        new_content = pattern.sub(new_section + "\n", existing_text)
+    else:
+        # 文件没 [mf_accounts] 段,追加
+        new_content = existing_text.rstrip() + "\n\n" + new_section
+
+    # 5. 写回
+    try:
+        _SECRETS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _SECRETS_PATH.write_text(new_content, encoding="utf-8")
+        print(f"[mf.py] 已保存 {phone} 密码到 {_SECRETS_PATH}")
+        return True
+    except Exception as e:
+        print(f"[mf.py] 保存密码失败: {type(e).__name__}: {e}")
+        return False
+
+
+def _escape_for_st_link_button(text: str) -> str:
+    """占位函数(将来可能用,现在不用)"""
+    return text
 
 
 class MFAdapter(AirlineAdapter):
@@ -116,10 +169,19 @@ class MFAdapter(AirlineAdapter):
     # 业务约束(在 _call_api / _call_xm_mf_verify 里校验):
     # - 模式 1: ticketNo 必填
     # - 模式 2: orderNo + accountPhone 必填
+    # - 模式 2 + 首次: accountPhone + password 都必填
     form_fields = [
         # 模式 2:只有订单号(2026-07-28 新增)
         FormField("orderNo", label="订单号(只有订单号时填)", placeholder="如:202607271326379366", required=False),
         FormField("accountPhone", label="白鹭会员手机号", placeholder="如:16673220623", required=False),
+        # 2026-07-28 新增:前端密码输入(首次输入会自动保存,以后免输入)
+        FormField(
+            "password",
+            label="密码(首次填会自动保存,以后免输入)",
+            placeholder="如已配置可留空",
+            required=False,
+            field_type="password",  # 浏览器密码框
+        ),
         # 模式 1:已知票号(原逻辑)
         FormField("ticketNo", label="票号", placeholder="如:731XXXXXXXX", required=False),
         FormField("passName", label="姓名", placeholder="如:ZHANG/SAN", required=False),
@@ -146,12 +208,21 @@ class MFAdapter(AirlineAdapter):
     # ============================================================
 
     def _call_xm_mf_verify(self, form_data: dict) -> dict:
-        """调 xm-mf-ticket-verify 项目,完成 OAuth2 登录 + 抓订单详情"""
+        """调 xm-mf-ticket-verify 项目,完成 OAuth2 登录 + 抓订单详情(2026-07-28 第三轮升级)
+
+        密码获取顺序:
+        1. 前端表单 password 字段(临时,本次用)
+        2. .streamlit/secrets.toml 里 [mf_accounts] 段(持久化)
+        3. 环境变量 XM_MF_PWD_<phone>(老用法)
+
+        登录成功后,前端传入的密码会自动写回 secrets.toml(覆盖)
+        """
         from xm_mf_verify.xiamenair import verify_ticket
         from xm_mf_verify.config import AppConfig, XiamenairConfig, PlaywrightConfig, DbConfig
 
         order_no = form_data.get("orderNo", "").strip()
         account_phone = form_data.get("accountPhone", "").strip()
+        password_from_form = form_data.get("password", "").strip()  # 2026-07-28 新增
 
         if not account_phone:
             return {
@@ -159,20 +230,28 @@ class MFAdapter(AirlineAdapter):
                 "return_msg": "订单号模式必须填白鹭会员手机号(accountPhone)",
             }
 
-        password = _get_password_for_phone(account_phone)
+        # 1. 优先用前端传入的密码(临时)
+        # 2. 兜底从 secrets.toml 读
+        # 3. 兜底从环境变量读
+        password = password_from_form or _get_password_for_phone(account_phone)
+        if not password:
+            env_key = f"XM_MF_PWD_{account_phone}"
+            password = os.environ.get(env_key, "")
+
         if not password:
             return {
                 "return_code": "FAIL",
                 "return_msg": (
-                    f"未配置白鹭会员 {account_phone} 密码的环境变量 XM_MF_PWD_{account_phone}。\n"
-                    f"PowerShell: $env:XM_MF_PWD_{account_phone} = 'your_password'"
+                    f"账号 {account_phone} 未配置密码。请在前端【密码】字段填入,会自动保存。\n"
+                    f"或设环境变量: $env:XM_MF_PWD_{account_phone} = 'your_password'"
                 ),
             }
 
+        # 如果前端传了密码且跟 secrets.toml 里不一样,标记登录成功后要写回
+        # (即使一样也写回,无副作用,实现简单)
+        should_save = bool(password_from_form)
+
         try:
-            # 自己 build cfg(2026-07-28):不依赖 config.yaml,行为可控
-            # - headless=True:verify-platform 跑 MF 自动验真,后台跑不弹浏览器
-            # - accounts_db / results_db:用 verify-platform 自己的 data 目录
             screenshots_dir = _MF_DATA_DIR / "screenshots"
             screenshots_dir.mkdir(parents=True, exist_ok=True)
             cfg = AppConfig(
@@ -182,7 +261,7 @@ class MFAdapter(AirlineAdapter):
                     booking_url_template="https://int-et.xiamenair.com/bookingManagement/displayBooking/list/{order_no}",
                 ),
                 playwright=PlaywrightConfig(
-                    headless=True,  # 平台内调,headless 跑
+                    headless=True,
                     screenshot_on_error=True,
                     screenshot_dir=str(screenshots_dir),
                 ),
@@ -191,8 +270,6 @@ class MFAdapter(AirlineAdapter):
                     results_db=_MF_RESULTS_DB,
                 ),
             )
-            # 验证码 solver:用 DdddocrSolver(纯自动,2026-07-28 实测 100% 准)
-            # 不传 → verify_ticket 用 ManualSolver 默认,会卡 5 分钟等用户
             from xm_mf_verify.captcha import DdddocrSolver
             result = verify_ticket(
                 order_no=order_no,
@@ -203,6 +280,9 @@ class MFAdapter(AirlineAdapter):
                 accounts_db=_MF_ACCOUNTS_DB,
                 captcha_solver=DdddocrSolver(),
             )
+            # 2026-07-28 新增:登录成功 + 前端传了密码 → 写回 secrets.toml
+            if should_save and not result.error:
+                _save_password_for_phone(account_phone, password)
             return self._convert_xm_mf_result(result)
         except Exception as e:
             return {
