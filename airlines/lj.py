@@ -11,6 +11,12 @@ import json
 import time
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
+try:
+    from playwright_stealth import stealth_sync
+    HAS_STEALTH = True
+except ImportError:
+    HAS_STEALTH = False
+
 from .base import AirlineAdapter, FormField
 
 
@@ -54,18 +60,46 @@ class LJAdapter(AirlineAdapter):
         }
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            # 2026-07-28: 加 launch args 减少被 Cloudflare 识别为 headless bot
+            # --disable-blink-features=AutomationControlled: 隐藏 navigator.webdriver
+            # --disable-features=AutomationControlled: 同上(Chrome 96+ 需要)
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                ],
+            )
             try:
                 context = browser.new_context(
-                    viewport={"width": 1280, "height": 720},
+                    viewport={"width": 1920, "height": 1080},
                     user_agent=(
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
                         "Chrome/120.0.0.0 Safari/537.36"
                     ),
                     locale="zh-CN",
+                    timezone_id="Asia/Shanghai",
+                    permissions=["geolocation", "notifications"],
                 )
+
+                # 兜底: 先用 context 级 init script 隐藏最显眼的自动化标志
+                # (navigator.webdriver 一定要是 undefined,Cloudflare 第一眼查的)
+                context.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                """)
+
                 page = context.new_page()
+
+                # playwright-stealth: 全面伪装浏览器指纹(plugins / languages / chrome runtime / webgl 等)
+                # v1.0+ API: stealth_sync(page)
+                if HAS_STEALTH:
+                    try:
+                        stealth_sync(page)
+                    except Exception as e:
+                        result["_warn_stealth"] = f"stealth_sync 失败: {e}"
 
                 # ============================================================
                 # Step 1: 打开 booking/index 过 Cloudflare challenge
@@ -78,19 +112,33 @@ class LJAdapter(AirlineAdapter):
                     return result
 
                 # 等 cf_clearance cookie 出现(Cloudflare 验证通过的标志)
-                # 通常 3-5s,极少数情况 30s+
+                # stealth 后通常 3-8s,极端情况 30s+,给到 60s
+                # Cloudflare 偶发需要二次刷新才放行,所以失败时再 reload 一次
                 waited = 0
-                max_wait = 45
+                max_wait = 60
                 cf_cookie_found = False
-                while waited < max_wait:
-                    cookies = context.cookies()
-                    if any(c.get("name") == "cf_clearance" for c in cookies):
-                        cf_cookie_found = True
-                        break
-                    page.wait_for_timeout(1000)
-                    waited += 1
 
-                result["_cf_wait_seconds"] = waited
+                for attempt in (1, 2):  # 第 1 次正常等,失败 reload 再等
+                    if attempt == 2:
+                        try:
+                            page.reload(wait_until="domcontentloaded", timeout=30000)
+                        except Exception:
+                            pass
+
+                    waited = 0
+                    while waited < max_wait:
+                        cookies = context.cookies()
+                        if any(c.get("name") == "cf_clearance" for c in cookies):
+                            cf_cookie_found = True
+                            break
+                        page.wait_for_timeout(1000)
+                        waited += 1
+
+                    if cf_cookie_found:
+                        result["_cf_attempts"] = attempt
+                        result["_cf_wait_seconds"] = waited
+                        break
+
                 if not cf_cookie_found:
                     # 兜底: 看页面是不是被 challenge 页面挡住
                     title = page.title()

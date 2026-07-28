@@ -10,3 +10,5 @@ pyyaml>=6.0
 loguru>=0.7
 # === 2026-07-28 LJ Jin Air 接入(cloudscraper 绕过 Cloudflare) ===
 cloudscraper>=1.2.71
+# === 2026-07-28 LJ 加 playwright-stealth 伪装浏览器过 Managed Challenge ===
+playwright-stealth>=1.0.0
