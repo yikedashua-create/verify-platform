@@ -17,6 +17,7 @@ OFFICIAL_VERIFY_URLS: dict = {
     "5j": "https://www.cebupacificair.com/zh-CN/manage-booking",
     "dd": "https://booking.nokair.com/zh/manage",
     "od": "https://www.bookcabin.com/manage-bookings",
+    "lj": "https://www.jinair.com/booking/index",
     # 剩 HX / MF 还没填
     # "hx": "https://...",
     # "mf": "https://...",

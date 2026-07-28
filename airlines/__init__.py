@@ -16,6 +16,7 @@ from .gq import GQAdapter
 from .fivej import FiveJAdapter
 from .dd import DDAdapter
 from .od import ODAdapter
+from .lj import LJAdapter
 
 # 所有航司在这里注册。新增航司 = 新建一个 xxx.py + 加到 REGISTRY
 REGISTRY: Dict[str, Type[AirlineAdapter]] = {
@@ -34,6 +35,7 @@ REGISTRY: Dict[str, Type[AirlineAdapter]] = {
     "5j": FiveJAdapter,
     "dd": DDAdapter,
     "od": ODAdapter,
+    "lj": LJAdapter,
 }
 
 
