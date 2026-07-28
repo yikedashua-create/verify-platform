@@ -19,6 +19,12 @@ datas = [('app.py', '.')]
 # 1. 整个 airlines/ 目录
 datas.append(('airlines', 'airlines'))
 
+# 1.1 xm_mf_verify 目录(2026-07-28 接入,MF 自动验真)
+# 这是从 xm-mf-ticket-verify 拷过来的整个包,内含 MF 订单详情自动化
+if Path('xm_mf_verify').exists():
+    datas.append(('xm_mf_verify', 'xm_mf_verify'))
+    print("  [spec] Including xm_mf_verify (MF 自动验真)")
+
 # 2. .streamlit 配置目录
 if Path('.streamlit').exists():
     datas.append(('.streamlit', '.streamlit'))
@@ -124,6 +130,21 @@ hiddenimports = [
     'anyio',
     'starlette',
     'fastapi',  # streamlit 内部 web server 用
+    # === 2026-07-28 xm-mf-ticket-verify 接入 ===
+    'xm_mf_verify',  # 主包
+    'xm_mf_verify.captcha',  # ddddocr 识别
+    'xm_mf_verify.xiamenair',  # MF 业务逻辑
+    'xm_mf_verify.session',  # Playwright session
+    'xm_mf_verify.config',  # 配置
+    'xm_mf_verify.db',  # SQLite
+    'xm_mf_verify.models',  # Pydantic models
+    'xm_mf_verify.batch',  # 批量
+    'ddddocr',  # 验证码 OCR(独立库)
+    'ddddocr.tools',  # ddddocr 内部 tools
+    'onnxruntime',  # ddddocr 底层依赖
+    'loguru',  # 日志(xm_mf_verify 用了)
+    'yaml',  # xm_mf_verify.config 用了
+    'pydantic',  # xm_mf_verify.models 用了(已从 excludes 移出)
 ]
 
 # ============================
@@ -164,8 +185,10 @@ a = Analysis(
         'emoji',
         'soundfile',
         'librosa',
-        'pydantic',
-        'fastapi',
+        # ⚠️ 2026-07-28 不再 exclude pydantic 和 fastapi
+        # 因为 xm-mf-ticket-verify 接入后,这两个库会被实际 import
+        # 'pydantic',
+        # 'fastapi',
         # ⚠️ 不能再 exclude uvicorn! streamlit 1.58+ 内部 web server 依赖它
         # 之前排除导致 "ModuleNotFoundError: No module named 'uvicorn'"
         'sqlalchemy',

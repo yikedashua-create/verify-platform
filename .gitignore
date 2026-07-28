@@ -32,3 +32,11 @@ desktop.ini
 
 # Streamlit secrets (真实凭据,不入库)
 .streamlit/secrets.toml
+
+# xm_mf_verify 数据(2026-07-28 MF 自动验真接入)
+# 包含:cookie 缓存 / verify_results.db / 截图
+# 整个 data/ 排除(包括 verify-platform 自己的 data/ 也一并排除)
+data/
+*.db
+# 防止意外 commit accounts.db / verify_results.db 到项目根
+# (虽然这些是 xm_mf_verify 自己的,根目录是 .exe 启动 cwd)
