@@ -334,8 +334,11 @@ class MFAdapter(AirlineAdapter):
     def _convert_xm_mf_result(self, result) -> dict:
         """把 xm-mf-ticket-verify 的 VerifyResult 转成 mf 适配器 raw 格式"""
         status = result.status.value if hasattr(result.status, "value") else str(result.status)
+        # 2026-07-29: 多人订单全部票号(向后兼容:用 ticket_nos 列表,没有就单元素)
+        ticket_nos = result.ticket_nos if getattr(result, "ticket_nos", None) else [result.ticket_no]
         xm_mf = {
             "ticket_no": result.ticket_no,
+            "ticket_nos": ticket_nos,  # 全部票号
             "order_no": result.order_no,
             "status": status,
             "raw_status": result.raw_status,
@@ -351,17 +354,21 @@ class MFAdapter(AirlineAdapter):
                 "_xm_mf_result": xm_mf,
             }
         # 成功:包装成类似内网 API 的 data 结构(让 _parse 复用)
+        # 2026-07-29: 多人订单每个票号生成一个 flightInvoiceInfoList 项
+        flight_invoice_list = []
+        for i, tn in enumerate(ticket_nos, 1):
+            flight_invoice_list.append({
+                "psgTicket": {"ticketNo": tn},
+                "psgType": "ADT",
+                "issueTime": str(result.queried_at),
+                "ticketInvoiceStatus": status,
+                "segmentInfoList": [],
+            })
         return {
             "return_code": "SUCCESS",
             "return_msg": "OK",
             "data": [{
-                "flightInvoiceInfoList": [{
-                    "psgTicket": {"ticketNo": result.ticket_no},
-                    "psgType": "ADT",
-                    "issueTime": str(result.queried_at),
-                    "ticketInvoiceStatus": status,
-                    "segmentInfoList": [],
-                }],
+                "flightInvoiceInfoList": flight_invoice_list,
             }],
             "_xm_mf_result": xm_mf,
         }
@@ -472,13 +479,21 @@ class MFAdapter(AirlineAdapter):
                 "error": f"xm-mf-ticket-verify 失败: {error}",
                 "flight_info": xm_mf,
             }
+        # 2026-07-29: 多人订单显示所有票号
+        ticket_nos = xm_mf.get("ticket_nos") or [xm_mf.get("ticket_no", "N/A")]
+        if len(ticket_nos) > 1:
+            ticket_display = "\n".join(f"            {tn}" for tn in ticket_nos)
+            ticket_line = f"票号({len(ticket_nos)}人):  {ticket_display}"
+        else:
+            ticket_line = f"票号:       {ticket_nos[0]}"
+
         output = [
             "=" * 50,
             "查询成功 (xm-mf-ticket-verify 自动验真)",
             "=" * 50,
             "",
             f"订单号:     {xm_mf.get('order_no', 'N/A')}",
-            f"票号:       {xm_mf.get('ticket_no', 'N/A')}",
+            ticket_line,
             f"票状态:     {xm_mf.get('status', 'N/A')}",
             f"原始状态:   {xm_mf.get('raw_status', 'N/A')}",
             f"查询账号:   {xm_mf.get('account_phone', 'N/A')}",

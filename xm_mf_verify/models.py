@@ -104,7 +104,8 @@ class Account(BaseModel):
 class VerifyResult(BaseModel):
     """单次验真结果(API 返回格式)"""
 
-    ticket_no: str = Field("", description="票号,731 开头(可选,仅做记录)")
+    ticket_no: str = Field("", description="第一个票号(731 开头,多人订单时)")
+    ticket_nos: list[str] = Field(default_factory=list, description="全部票号(2026-07-29 加,多人订单)")
     order_no: str = Field("", description="订单号(查订单详情用)")
     status: TicketStatus = Field(..., description="归一化后的票状态")
     raw_status: str = Field("", description="页面原始状态字符串")

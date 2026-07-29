@@ -111,16 +111,18 @@ TICKET_STATUS_HTML_MAP = {
 }
 
 
-def _extract_ticket_no_from_html(html: str) -> Optional[str]:
-    """从 HTML 源码里提票号(优先 '客票号:' 前缀)"""
-    m = TICKET_NO_HTML_RE.search(html)
-    if m:
-        return m.group(1)
+def _extract_ticket_no_from_html(html: str) -> list[str]:
+    """从 HTML 源码里提所有票号(优先 '客票号:' 前缀)
+    2026-07-29 改:返回 list(多人订单有多个票号,之前只返回第一个)
+    """
+    found = TICKET_NO_HTML_RE.findall(html)
+    if found:
+        return list(dict.fromkeys(found))  # 去重保序
     # 兜底:任意 731 开头 13 位
-    m = TICKET_NO_DIRECT_RE.search(html)
-    if m:
-        return m.group(1)
-    return None
+    found = TICKET_NO_DIRECT_RE.findall(html)
+    if found:
+        return list(dict.fromkeys(found))
+    return []
 
 
 def _extract_status_from_html(html: str) -> Optional[str]:
@@ -547,18 +549,23 @@ def fetch_booking_details(
             )
 
     # === 主路径:HTML 结构化解析 ===
-    raw_ticket = _extract_ticket_no_from_html(html)
+    raw_tickets = _extract_ticket_no_from_html(html)  # 2026-07-29: 改成 list
     raw_status = _extract_status_from_html(html)
     pnr = _extract_pnr_from_html(html)
 
-    # 票号归一化
-    ticket_no = ""
-    if raw_ticket:
+    # 票号归一化(全部,去重保序)
+    ticket_nos: list[str] = []
+    for raw in raw_tickets:
         try:
-            ticket_no = normalize_ticket_no(raw_ticket)
-            logger.info(f"[booking] 拿到票号: {ticket_no} (raw={raw_ticket})")
+            tn = normalize_ticket_no(raw)
+            if tn and tn not in ticket_nos:
+                ticket_nos.append(tn)
         except ValueError as e:
-            logger.warning(f"[booking] 票号归一化失败: {e} (raw={raw_ticket})")
+            logger.warning(f"[booking] 票号归一化失败: {e} (raw={raw})")
+    if ticket_nos:
+        logger.info(f"[booking] 拿到 {len(ticket_nos)} 个票号: {ticket_nos}")
+    # 兼容老 API:第一个票号
+    ticket_no = ticket_nos[0] if ticket_nos else ""
 
     # 状态归一化
     status = TicketStatus.UNKNOWN
@@ -595,7 +602,7 @@ def fetch_booking_details(
     if pnr:
         logger.info(f"[booking] PNR: {pnr}")
 
-    if not raw_ticket and not raw_status:
+    if not raw_tickets and not raw_status:
         logger.warning(f"[booking] 订单详情页里没找到票号也没找到状态")
         preview = html[:800] if html else "(空)"
         logger.warning(f"[booking] === HTML 预览(前 800 字) ===\n{preview}\n=== 预览结束 ===")
@@ -618,17 +625,19 @@ def fetch_booking_details(
         raw_status=status_source,
         status=status,
         ticket_no=ticket_no,
+        ticket_nos=ticket_nos,  # 2026-07-29: 多人订单全部票号
         pnr=pnr or "",
     )
 
 
-# BookingDetails 容器(2026-07-27 加)
+# BookingDetails 容器(2026-07-27 加,2026-07-29 扩展支持多人订单)
 @dataclass
 class BookingDetails:
     """订单详情页解析结果"""
     raw_status: str
     status: TicketStatus
-    ticket_no: str
+    ticket_no: str  # 第一个票号(兼容老 API)
+    ticket_nos: list[str] = field(default_factory=list)  # 全部票号(多人订单)
     pnr: str = ""
 
 
@@ -797,6 +806,7 @@ def verify_ticket(
             final_ticket_no = details.ticket_no or ticket_no
             return VerifyResult(
                 ticket_no=final_ticket_no,
+                ticket_nos=details.ticket_nos or [final_ticket_no],  # 2026-07-29: 多人订单全部票号
                 order_no=order_no,
                 status=details.status,
                 raw_status=details.raw_status,
