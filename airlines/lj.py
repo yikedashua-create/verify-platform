@@ -1,21 +1,37 @@
-"""LJ Jin Air 韩国真航空适配器 (2026-07-28 第三版: Playwright 拿 Cloudflare cookie + 直调 JSON API)
+"""LJ Jin Air 韩国真航空适配器 (2026-07-29 第五版: 真实填表 + 拦截 XHR + 韩国代理)
 
 查票方式: PNR + 姓 + 名 + 出发日期
-- Cloudflare 反爬: 先用 Playwright 打开 booking/index 过 challenge 拿 cf_clearance
-- 数据接口: POST https://www.jinair.com/mypage/getReservationDetailJson?pnrNumber=<PNR>
+- Cloudflare 反爬: Playwright + stealth 过 challenge 拿 cf_clearance
+- 数据获取: 真实填写 booking/index 表单,拦截表单 onSubmit 触发的 XHR 响应
+  - 接口: POST https://www.jinair.com/mypage/getReservationDetailJson?pnrNumber=<PNR>
   - 响应是完整 JSON (含 pnrStatusName/paxDetailList/segmentDetailList/flightCharge 等)
-  - 2026-07-28 由用户 DevTools 实测确认 URL/格式
-- 不再走填表,避免 Cloudflare 一直卡 0 inputs 的死循环
+- 关键约束: 国内 IP 无法访问 jinair.com,必须配置 LJ_PROXY_URL 韩国代理
+  - 2026-07-29 用户实测: Cloudflare 一直 403 = 国内 IP 被 Cloudflare 风控
+  - 必须 http://user:pass@kr-proxy:port 或 socks5://user:pass@kr-proxy:port
+  - 整个 Playwright 走代理(包括 DNS + TLS)
+- 不用 page.evaluate(fetch) 的原因:
+  - Cloudflare 在页面加载后做行为分析,纯 XHR 缺乏"用户交互"轨迹 → 403
+  - 用真实表单提交,Cloudflare 信任,on('response') 拦截 XHR 直接拿 JSON
 """
 import json
+import os
+import sys
 import time
+from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 try:
-    from playwright_stealth import stealth_sync
+    from playwright_stealth import Stealth as _StealthClass
     HAS_STEALTH = True
+    _STEALTH_NEW_API = True
 except ImportError:
-    HAS_STEALTH = False
+    try:
+        from playwright_stealth import stealth_sync  # 老 API (<2.0)
+        HAS_STEALTH = True
+        _STEALTH_NEW_API = False
+    except ImportError:
+        HAS_STEALTH = False
+        _STEALTH_NEW_API = False
 
 from .base import AirlineAdapter, FormField
 
@@ -55,24 +71,150 @@ class LJAdapter(AirlineAdapter):
             "firstName": first_name,
             "departDate": depart_date,
             "_html": "",
-            "_method": "json_api",
+            "_method": "form_submit_intercept",
             "_raw": None,
         }
+
+        # ============================================================
+        # 2026-07-29: 解析代理 URL(国内 IP 无法访问韩国航司站)
+        # ============================================================
+        # LJ_PROXY_URL 格式:
+        #   http://user:pass@host:port
+        #   https://user:pass@host:port
+        #   socks5://user:pass@host:port
+        # 没配: 本地开发用系统 VPN 即可,生产环境(Railway)才强制要求
+        proxy_url = os.environ.get("LJ_PROXY_URL", "").strip()
+        is_railway = bool(os.environ.get("RAILWAY_ENVIRONMENT")) or bool(os.environ.get("RAILWAY_PROJECT_ID"))
+        proxy_config = None
+
+        if proxy_url:
+            try:
+                parsed = urlparse(proxy_url)
+                proxy_config = {
+                    "server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}",
+                }
+                if parsed.username:
+                    proxy_config["username"] = parsed.username
+                    proxy_config["password"] = parsed.password or ""
+                # 记录到 result 但隐藏密码
+                safe_url = proxy_url
+                if "@" in safe_url:
+                    safe_url = safe_url.split("@", 1)[0].split("://", 1)[0] + "://***@" + safe_url.split("@", 1)[1]
+                result["_proxy"] = safe_url
+            except Exception as e:
+                return {
+                    **result,
+                    "_error": f"LJ_PROXY_URL 解析失败: {type(e).__name__}: {e}",
+                }
+        elif is_railway:
+            # Railway 部署 = 生产,必须配代理
+            return {
+                **result,
+                "_error": (
+                    "Railway 部署必须配 LJ_PROXY_URL — 国内 IP 无法访问 jinair.com "
+                    "(Cloudflare 直接 403),需在 Railway Variables 配韩国代理 "
+                    "(支持 http(s)://user:pass@host:port 或 socks5://user:pass@host:port)"
+                ),
+            }
+        else:
+            # 本地开发:不强制配代理,直接走 TUN/系统网络
+            # 2026-07-29 不再 auto-detect 系统代理 —— 跟 TUN 模式冲突,见日志
+            result["_proxy"] = None
+            result["_proxy_warn"] = (
+                "未配 LJ_PROXY_URL,本机依赖 TUN/全局模式(VPN 客户端的 OS 层劫持)。"
+                "如果你的 VPN 是系统代理模式(Windows 设置了 127.0.0.1:xxx),需要显式配 LJ_PROXY_URL。"
+                "部署 Railway 前必须显式配。"
+            )
 
         with sync_playwright() as p:
             # 2026-07-28: 加 launch args 减少被 Cloudflare 识别为 headless bot
             # --disable-blink-features=AutomationControlled: 隐藏 navigator.webdriver
             # --disable-features=AutomationControlled: 同上(Chrome 96+ 需要)
-            browser = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ],
-            )
-            try:
+            # 2026-07-29: 支持用系统 Chrome profile(LJ_USE_CHROME_PROFILE=1)
+            # 借用用户的 Chrome 二进制 + profile(包括 cookies、扩展、历史)
+            # → 浏览器指纹、TLS 指纹、cookies 全部一致,Cloudflare 认成「同一个人」
+            # 前提:用户先关掉 Chrome(profile 被锁启动不了)
+            #
+            # 关键:Chrome 拒绝在「默认 profile 目录」上开 DevTools remote debugging,
+            # 所以必须先把 profile 复制到独立目录
+            use_chrome_profile = os.environ.get("LJ_USE_CHROME_PROFILE", "").strip().lower() in ("1", "true", "yes")
+            chrome_user_data = None
+            if use_chrome_profile:
+                if sys.platform == "win32":
+                    source_profile = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
+                    target_profile = os.path.expandvars(r"%LOCALAPPDATA%\PlaywrightChromeProfile")
+                elif sys.platform == "darwin":
+                    source_profile = os.path.expanduser("~/Library/Application Support/Google/Chrome")
+                    target_profile = os.path.expanduser("~/.playwright_chrome_profile")
+                else:
+                    source_profile = os.path.expanduser("~/.config/google-chrome")
+                    target_profile = os.path.expanduser("~/.playwright_chrome_profile")
+
+                # 允许通过 LJ_CHROME_PROFILE_DIR 覆盖 target
+                env_target = os.environ.get("LJ_CHROME_PROFILE_DIR", "").strip()
+                if env_target:
+                    target_profile = env_target
+
+                if not os.path.exists(source_profile):
+                    result["_warn_chrome_profile"] = (
+                        f"LJ_USE_CHROME_PROFILE=1 但找不到 Chrome source profile: {source_profile}"
+                    )
+                else:
+                    # 如果 target 不存在,复制(排除缓存目录加速)
+                    if not os.path.exists(target_profile):
+                        try:
+                            import shutil
+                            result["_chrome_profile_copying"] = (
+                                f"首次启动,正在复制 Chrome profile 到 {target_profile} ..."
+                            )
+                            ignore_patterns = shutil.ignore_patterns(
+                                "Cache", "Code Cache", "Service Worker", "GPUCache",
+                                "ShaderCache", "GraphiteDawnCache",
+                                "optimization_guide_model_browser_process",
+                            )
+                            shutil.copytree(source_profile, target_profile, ignore=ignore_patterns)
+                            result["_chrome_profile_copied"] = True
+                        except Exception as e:
+                            result["_warn_chrome_profile"] = (
+                                f"复制 Chrome profile 失败: {type(e).__name__}: {e}"
+                            )
+                            target_profile = None
+                    chrome_user_data = target_profile
+
+            if chrome_user_data:
+                # 用系统 Chrome + 用户的 profile(持久化 context,cookies 共享)
+                # 2026-07-29 关键修复:ignore_default_args=["--enable-automation"]
+                #   Playwright 默认会加 --enable-automation,这个 flag 直接把
+                #   navigator.webdriver 设为 true,Cloudflare 第一眼就识破
+                #   我们用 --disable-blink-features=AutomationControlled 掩盖只能骗
+                #   简单检测,Cloudflare 这种高级 WAF 还是查得到启动参数
+                context = p.chromium.launch_persistent_context(
+                    user_data_dir=chrome_user_data,
+                    channel="chrome",  # 用系统 Chrome,不是 bundled Chromium
+                    headless=True,
+                    no_viewport=True,
+                    locale="zh-CN",
+                    timezone_id="Asia/Shanghai",
+                    permissions=["geolocation", "notifications"],
+                    proxy=proxy_config,
+                    ignore_default_args=["--enable-automation"],
+                )
+                page = context.pages[0] if context.pages else context.new_page()
+                result["_chrome_profile"] = chrome_user_data
+                result["_no_enable_automation"] = True
+                browser = None  # launch_persistent_context 已经管理生命周期
+            else:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-features=AutomationControlled",
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                    ],
+                    ignore_default_args=["--enable-automation"],  # 2026-07-29: 关键
+                    proxy=proxy_config,  # 显式代理(LJ_PROXY_URL 设了才用,否则 None = 走 TUN)
+                )
                 context = browser.new_context(
                     viewport={"width": 1920, "height": 1080},
                     user_agent=(
@@ -93,13 +235,20 @@ class LJAdapter(AirlineAdapter):
 
                 page = context.new_page()
 
-                # playwright-stealth: 全面伪装浏览器指纹(plugins / languages / chrome runtime / webgl 等)
-                # v1.0+ API: stealth_sync(page)
-                if HAS_STEALTH:
-                    try:
+            # playwright-stealth: 全面伪装浏览器指纹(plugins / languages / chrome runtime / webgl 等)
+            # v2.0+ API: Stealth().apply_stealth_sync(page)
+            # v1.0 API: stealth_sync(page)
+            # 持久化 Chrome 模式下不需要 stealth(已经是真 Chrome),但用也无害
+            if HAS_STEALTH and not chrome_user_data:
+                try:
+                    if _STEALTH_NEW_API:
+                        _StealthClass().apply_stealth_sync(page)
+                    else:
                         stealth_sync(page)
-                    except Exception as e:
-                        result["_warn_stealth"] = f"stealth_sync 失败: {e}"
+                except Exception as e:
+                    result["_warn_stealth"] = f"stealth apply 失败: {e}"
+
+            try:
 
                 # ============================================================
                 # Step 1: 打开 booking/index 过 Cloudflare challenge
@@ -154,36 +303,164 @@ class LJAdapter(AirlineAdapter):
                     return result
 
                 # ============================================================
-                # Step 2: 用 context.request 调 JSON API(带 cf_clearance cookie)
+                # Step 2: 等表单渲染(Cloudflare 过了之后 SPA 才挂 form)
                 # ============================================================
-                # URL 走 query string,body 空(JSON 格式),参考用户 DevTools 截图
-                request_url = f"{API_URL}?pnrNumber={pnr}"
-                try:
-                    api_resp = context.request.post(
-                        request_url,
-                        headers={
-                            "Accept": "application/json, text/plain, */*",
-                            "Content-Type": "application/json",
-                            "X-Requested-With": "XMLHttpRequest",
-                        },
-                        data="{}",  # 空 JSON body
-                        timeout=self.timeout * 1000,
+                waited = 0
+                max_form_wait = 30
+                input_count = 0
+                while waited < max_form_wait:
+                    inputs = page.locator('input').all()
+                    input_count = len(inputs)
+                    if input_count >= 4:
+                        break
+                    page.wait_for_timeout(1000)
+                    waited += 1
+                result["_form_wait_seconds"] = waited
+                result["_input_count"] = input_count
+
+                if input_count < 4:
+                    result["_error"] = (
+                        f"表单未渲染(等了 {waited}s, 只找到 {input_count} 个 input, "
+                        f"page_title={page.title()!r})"
                     )
-                    status = api_resp.status
-                    text = api_resp.text()
-                except PlaywrightTimeout:
-                    result["_error"] = f"调 {API_URL} 超时 ({self.timeout}s)"
-                    return result
-                except Exception as e:
-                    result["_error"] = f"调 {API_URL} 失败: {type(e).__name__}: {e}"
+                    try:
+                        result["_html"] = page.content()[:2000]
+                    except Exception:
+                        pass
                     return result
 
+                # ============================================================
+                # Step 3: 真实填表 + 拦截 XHR 响应(2026-07-28 第三次重构)
+                # ============================================================
+                # 为什么不用 page.evaluate(fetch):
+                #   Cloudflare 在页面加载后做行为分析,纯 XHR 没有"用户交互"轨迹(没鼠标/滚动/等待),
+                #   直接 fetch 拿不到 cf_clearance 的完整信任,返回 403 + 拦截页
+                # 为什么 form submit 有效:
+                #   浏览器原生 form 提交是 Cloudflare 默认信任的"真人行为",配 XHR 是表单 onSubmit 触发,
+                #   行为轨迹和真实用户 100% 一致
+                # 拦截 on('response') 拿到 XHR 响应,避免解析 HTML 结果页
+
+                # 监听 XHR 响应
+                api_response_data = []
+                def on_response(response):
+                    if 'getReservationDetailJson' in response.url:
+                        try:
+                            req = response.request
+                            api_response_data.append({
+                                'status': response.status,
+                                'text': response.text(),  # 同步 str (Playwright sync API)
+                                'url': response.url,
+                                'resource_type': req.resource_type,  # 'xhr' / 'fetch' / 'document'
+                                'method': req.method,
+                            })
+                        except Exception as e:
+                            api_response_data.append({'error': str(e), 'url': response.url})
+                page.on('response', on_response)
+
+                # 填表(用 keyboard.type 模拟真人打字,不是 fill() 直接 setValue)
+                #   2026-07-29 关键: fill() 是 setValue + 1 个 input 事件,不像真人
+                #   Cloudflare 行为分析能识别「200ms 内填完 4 字段+立刻点提交」= bot
+                #   keyboard.type 每个字符间有真实 keydown/keyup/input 事件 + 间隔
+                try:
+                    inputs = page.locator('input').all()
+
+                    # 模拟"读页面"的思考时间
+                    page.wait_for_timeout(1500)
+
+                    # 字段 1: PNR(大写字母)
+                    inputs[0].click(timeout=5000)
+                    page.wait_for_timeout(300)
+                    page.keyboard.type(pnr, delay=80)  # 每字符 80ms
+                    page.wait_for_timeout(500)
+
+                    # 字段 2: 姓
+                    inputs[1].click(timeout=5000)
+                    page.wait_for_timeout(300)
+                    page.keyboard.type(last_name, delay=80)
+                    page.wait_for_timeout(500)
+
+                    # 字段 3: 名
+                    inputs[2].click(timeout=5000)
+                    page.wait_for_timeout(300)
+                    page.keyboard.type(first_name, delay=80)
+                    page.wait_for_timeout(500)
+
+                    # 字段 4: 出发日期(date 类型 input 也吃 type 事件,只是格式必须是 YYYY-MM-DD)
+                    inputs[3].click(timeout=5000)
+                    page.wait_for_timeout(300)
+                    page.keyboard.type(depart_date, delay=60)
+                    page.wait_for_timeout(1000)  # "看完再提交"的停顿
+
+                    result["_fill_ok"] = True
+                    result["_fill_method"] = "keyboard.type"
+                except Exception as e:
+                    result["_error"] = f"填表失败: {type(e).__name__}: {e}"
+                    return result
+
+                # 点提交(也用 mouse.move 模拟真实光标轨迹)
+                try:
+                    submit_btn = page.locator(
+                        'button[type="submit"], button:has-text("查询"), a:has-text("查询")'
+                    ).first
+                    box = submit_btn.bounding_box()
+                    if box:
+                        # 从屏幕中心慢慢移动到按钮(分 5 步)
+                        start_x, start_y = 640, 400
+                        end_x = box["x"] + box["width"] / 2
+                        end_y = box["y"] + box["height"] / 2
+                        page.mouse.move(start_x, start_y)
+                        for step in range(1, 6):
+                            page.mouse.move(
+                                start_x + (end_x - start_x) * step / 5,
+                                start_y + (end_y - start_y) * step / 5,
+                                steps=5,
+                            )
+                        page.wait_for_timeout(200)
+                    submit_btn.click(timeout=5000)
+                    result["_click_ok"] = True
+                except Exception as e:
+                    result["_error"] = f"点提交按钮失败: {type(e).__name__}: {e}"
+                    return result
+
+                # 等 API 响应
+                waited = 0
+                max_api_wait = 30
+                while not api_response_data and waited < max_api_wait:
+                    page.wait_for_timeout(1000)
+                    waited += 1
+                result["_api_wait_seconds"] = waited
+
+                if not api_response_data:
+                    result["_error"] = (
+                        f"提交后未收到 API 响应 (等了 {waited}s, "
+                        f"page_url={page.url!r})"
+                    )
+                    return result
+
+                api_data = api_response_data[0]
+                if api_data.get("error"):
+                    result["_error"] = f"响应回调失败: {api_data['error']}"
+                    return result
+
+                status = api_data.get("status")
+                text = api_data.get("text", "")
+                resource_type = api_data.get("resource_type", "?")
+                req_method = api_data.get("method", "?")
                 result["_http_status"] = status
-                result["_http_url"] = request_url
+                result["_http_url"] = api_data.get("url", "")
+                result["_http_resource_type"] = resource_type
+                result["_http_method"] = req_method
                 result["_http_text_preview"] = text[:500] if text else ""
 
                 if status != 200:
-                    result["_error"] = f"API 返回 HTTP {status}: {text[:300]}"
+                    # 区分: 是 Cloudflare 拦截页(<!DOCTYPE html>)还是真的 API 错误响应
+                    is_cf_block = text.lstrip().startswith("<!DOCTYPE html>") or "Attention Required" in text[:2000]
+                    block_type = "Cloudflare 拦截页" if is_cf_block else "API 错误"
+                    result["_error"] = (
+                        f"{block_type} (HTTP {status}, type={resource_type}, "
+                        f"method={req_method}): {text[:300]}"
+                    )
+                    result["_is_cf_block"] = is_cf_block
                     return result
 
                 # ============================================================
@@ -205,7 +482,11 @@ class LJAdapter(AirlineAdapter):
                 return result
             finally:
                 try:
-                    browser.close()
+                    if browser is not None:
+                        browser.close()
+                    else:
+                        # 持久化 context 模式:关掉 context
+                        context.close()
                 except Exception:
                     pass
 
