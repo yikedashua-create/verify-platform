@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -598,6 +599,19 @@ def fetch_booking_details(
         logger.warning(f"[booking] 订单详情页里没找到票号也没找到状态")
         preview = html[:800] if html else "(空)"
         logger.warning(f"[booking] === HTML 预览(前 800 字) ===\n{preview}\n=== 预览结束 ===")
+        # 2026-07-29: 失败时把完整 HTML 保存到文件,方便排查页面结构变化
+        try:
+            import os
+            from datetime import datetime
+            debug_dir = os.path.join(os.path.dirname(__file__), "..", "data", "xm_mf_verify", "debug_html")
+            debug_dir = os.path.abspath(debug_dir)
+            os.makedirs(debug_dir, exist_ok=True)
+            debug_file = os.path.join(debug_dir, f"order_{order_no}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html")
+            with open(debug_file, "w", encoding="utf-8") as f:
+                f.write(html or "")
+            logger.info(f"[booking] 完整 HTML 已保存到: {debug_file}")
+        except Exception as e:
+            logger.warning(f"[booking] 保存 debug HTML 失败: {e}")
         return None
 
     return BookingDetails(
@@ -748,6 +762,26 @@ def verify_ticket(
             details = fetch_booking_details(page, order_no, cfg, debug_network=debug_network)
 
             if details is None:
+                # 2026-07-29: 错误信息带上 HTML 路径 + 手动验证链接
+                debug_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "xm_mf_verify", "debug_html"))
+                # 找最新的 debug HTML(刚 fetch_booking_details 写的)
+                debug_files = []
+                if os.path.isdir(debug_dir):
+                    debug_files = sorted(
+                        [os.path.join(debug_dir, f) for f in os.listdir(debug_dir) if f.startswith(f"order_{order_no}_")],
+                        key=os.path.getmtime, reverse=True
+                    )
+                latest_html = debug_files[0] if debug_files else ""
+                manual_url = f"https://int-et.xiamenair.com/bookingManagement/displayBooking/list/{order_no}"
+                err_msg = (
+                    f"订单 {order_no} 详情页里没找到票号/状态(可能订单不存在 / 页面结构不同)\n"
+                    f"📄 完整 HTML: {latest_html}\n"
+                    f"🔗 手动核对(用白鹭会员 {account_phone} 登录后打开): {manual_url}\n"
+                    f"💡 可能原因:\n"
+                    f"   1. 订单不在账号 {account_phone} 下(用了别的白鹭会员号买的)\n"
+                    f"   2. 订单还没出票(刚下的单子,票号还没生成)\n"
+                    f"   3. 页面结构变了(打开上面 HTML 看实际渲染)"
+                )
                 return VerifyResult(
                     ticket_no=ticket_no,
                     order_no=order_no,
@@ -756,7 +790,7 @@ def verify_ticket(
                     queried_at=datetime.now(),
                     account_phone=account_phone,
                     took_ms=int((time.time() - t0) * 1000),
-                    error=f"订单 {order_no} 详情页里没找到票号/状态(可能订单不存在 / 页面结构不同)",
+                    error=err_msg,
                 )
 
             # 优先用页面拿到的真实票号(覆盖 CLI 传的,如果有)
