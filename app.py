@@ -215,6 +215,9 @@ if last and last_airline == selected["code"]:
         if last.get("success"):
             st.markdown('<span class="badge badge-success">✅ 查询成功</span>', unsafe_allow_html=True)
             st.code(last.get("data", ""), language="text")
+            # 2026-07-30: 成功也展示原始响应(用户要看全部数据,不要只展示几个字段)
+            with st.expander("📦 全部数据(原始响应)"):
+                st.json(last)
         else:
             st.markdown('<span class="badge badge-error">❌ 查询失败</span>', unsafe_allow_html=True)
             st.error(last.get("error", "未知错误"))
