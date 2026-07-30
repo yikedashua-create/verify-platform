@@ -336,16 +336,27 @@ class MFAdapter(AirlineAdapter):
         status = result.status.value if hasattr(result.status, "value") else str(result.status)
         # 2026-07-29: 多人订单全部票号(向后兼容:用 ticket_nos 列表,没有就单元素)
         ticket_nos = result.ticket_nos if getattr(result, "ticket_nos", None) else [result.ticket_no]
+        # 2026-07-30: 完整数据(乘机人/航段/JSON)
+        passengers = getattr(result, "passengers", None) or []
+        segments = getattr(result, "segments", None) or []
         xm_mf = {
             "ticket_no": result.ticket_no,
-            "ticket_nos": ticket_nos,  # 全部票号
+            "ticket_nos": ticket_nos,
             "order_no": result.order_no,
+            "pnr": getattr(result, "pnr", ""),
             "status": status,
             "raw_status": result.raw_status,
             "queried_at": result.queried_at.isoformat() if hasattr(result.queried_at, "isoformat") else str(result.queried_at),
             "account_phone": result.account_phone,
             "took_ms": result.took_ms,
             "error": result.error,
+            # 2026-07-30: JSON API 拿到的完整数据
+            "passengers": passengers,
+            "segments": segments,
+            "contact_name": getattr(result, "contact_name", ""),
+            "contact_phone": getattr(result, "contact_phone", ""),
+            "booking_id": getattr(result, "booking_id", ""),
+            "raw_json": getattr(result, "raw_json", None),
         }
         if result.error:
             return {
@@ -479,27 +490,85 @@ class MFAdapter(AirlineAdapter):
                 "error": f"xm-mf-ticket-verify 失败: {error}",
                 "flight_info": xm_mf,
             }
-        # 2026-07-29: 多人订单显示所有票号
+
+        # 2026-07-30: 完整数据展示(优先用 JSON API 拿到的 passengers/segments/PNR/联系人)
         ticket_nos = xm_mf.get("ticket_nos") or [xm_mf.get("ticket_no", "N/A")]
-        if len(ticket_nos) > 1:
-            ticket_display = "\n".join(f"            {tn}" for tn in ticket_nos)
-            ticket_line = f"票号({len(ticket_nos)}人):  {ticket_display}"
-        else:
-            ticket_line = f"票号:       {ticket_nos[0]}"
+        passengers = xm_mf.get("passengers") or []
+        segments = xm_mf.get("segments") or []
+        pnr = xm_mf.get("pnr", "")
+        contact_name = xm_mf.get("contact_name", "")
+        contact_phone = xm_mf.get("contact_phone", "")
 
         output = [
             "=" * 50,
-            "查询成功 (xm-mf-ticket-verify 自动验真)",
+            "查询成功 (xm-mf-ticket-verify 自动验真 + JSON API)",
             "=" * 50,
             "",
             f"订单号:     {xm_mf.get('order_no', 'N/A')}",
-            ticket_line,
+        ]
+        if pnr:
+            output.append(f"PNR:        {pnr}")
+        if xm_mf.get("booking_id"):
+            output.append(f"BookingID:  {xm_mf['booking_id']}")
+
+        # 乘机人(关键!现在每人有票号 + 状态 + 名字)
+        if passengers:
+            output.append("")
+            output.append(f"【乘机人({len(passengers)}人)】")
+            for i, pax in enumerate(passengers, 1):
+                name = pax.get("name") or "N/A"
+                tno = pax.get("ticket_no") or "N/A"
+                tstatus = pax.get("ticket_status_cn") or pax.get("ticket_status") or "N/A"
+                ptype = pax.get("passenger_type") or ""
+                ptype_str = f" [{ptype}]" if ptype else ""
+                line = f"  {i}. {name}{ptype_str}"
+                line += f"\n     票号: {tno}  状态: {tstatus}"
+                # 附加信息(护照 + 出生日期)
+                extras = []
+                if pax.get("doc_id"):
+                    extras.append(f"证件:{pax.get('doc_type','')} {pax.get('doc_id','')}")
+                if pax.get("date_of_birth"):
+                    extras.append(f"DOB:{pax['date_of_birth']}")
+                if extras:
+                    line += f"\n     {' | '.join(extras)}"
+                output.append(line)
+        else:
+            # 兜底:只有票号没乘客数据(HTML 解析路径)
+            if len(ticket_nos) > 1:
+                ticket_display = "\n".join(f"            {tn}" for tn in ticket_nos)
+                output.append(f"票号({len(ticket_nos)}人):  {ticket_display}")
+            else:
+                output.append(f"票号:       {ticket_nos[0]}")
+
+        # 航段
+        if segments:
+            output.append("")
+            output.append("【航段】")
+            for i, seg in enumerate(segments, 1):
+                line = f"  {i}. {seg.get('flight_no','?')}  {seg.get('from','')} → {seg.get('to','')}"
+                if seg.get("from_name") or seg.get("to_name"):
+                    line += f"  ({seg.get('from_name','')} → {seg.get('to_name','')})"
+                line += f"\n     出发: {seg.get('depart_time','')}"
+                if seg.get("duration"):
+                    line += f"  飞行: {seg['duration']}"
+                output.append(line)
+
+        # 联系人
+        if contact_name or contact_phone:
+            output.append("")
+            output.append("【联系人】")
+            output.append(f"  姓名: {contact_name or 'N/A'}")
+            if contact_phone:
+                output.append(f"  电话: {contact_phone}")
+
+        output.extend([
+            "",
             f"票状态:     {xm_mf.get('status', 'N/A')}",
             f"原始状态:   {xm_mf.get('raw_status', 'N/A')}",
             f"查询账号:   {xm_mf.get('account_phone', 'N/A')}",
             f"查询时间:   {xm_mf.get('queried_at', 'N/A')}",
             f"耗时:       {xm_mf.get('took_ms', 0)} ms",
-        ]
+        ])
         return {
             "success": True,
             "data": "\n".join(output),

@@ -494,22 +494,39 @@ def fetch_booking_details(
     logger.info(f"[booking] 直接访问订单详情: {url}")
 
     # 2026-07-27 加:debug_network 时挂监听
+    # 2026-07-30 改:始终挂监听 — 抓 /tRetailAPISolution/order/extract/{bookingId} 的 JSON
+    # 这接口返回完整订单数据(含乘客姓名),比 HTML 解析准多了
     captured_responses = []
-    if debug_network:
-        def _on_response(resp):
-            try:
-                req = resp.request
-                if req.resource_type in ("xhr", "fetch"):
-                    captured_responses.append({
-                        "url": resp.url,
-                        "method": req.method,
-                        "status": resp.status,
-                        "ct": resp.headers.get("content-type", ""),
-                        "size": len(resp.body() or b""),
-                    })
-            except Exception as e:
-                logger.debug(f"[booking] 监听 response 异常: {e}")
-        page.on("response", _on_response)
+    captured_booking_json = []  # 抓到的订单 JSON(完整数据,带姓名)
+
+    def _on_response(resp):
+        try:
+            req = resp.request
+            url = resp.url
+            # 2026-07-30:抓 order/extract 这个 JSON API(返回完整乘客数据)
+            if "/tRetailAPISolution/order/extract/" in url or "/order/extract/" in url:
+                try:
+                    body = resp.body()
+                    if body:
+                        captured_booking_json.append({
+                            "url": url,
+                            "status": resp.status,
+                            "json": json.loads(body.decode("utf-8", errors="replace")),
+                        })
+                        logger.info(f"[booking] 抓到订单 JSON 响应: {url} ({resp.status})")
+                except Exception as e:
+                    logger.debug(f"[booking] 解析 order/extract JSON 失败: {e}")
+            if debug_network and req.resource_type in ("xhr", "fetch"):
+                captured_responses.append({
+                    "url": url,
+                    "method": req.method,
+                    "status": resp.status,
+                    "ct": resp.headers.get("content-type", ""),
+                    "size": len(resp.body() or b""),
+                })
+        except Exception as e:
+            logger.debug(f"[booking] 监听 response 异常: {e}")
+    page.on("response", _on_response)
 
     page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
@@ -518,6 +535,17 @@ def fetch_booking_details(
         page.wait_for_load_state("networkidle", timeout=15000)
     except PWTimeoutError:
         pass
+
+    # 2026-07-30: 优先用抓到的 JSON(完整数据,有姓名),HTML 解析只作兜底
+    if captured_booking_json:
+        try:
+            details = _parse_booking_from_json(captured_booking_json[0]["json"], order_no)
+            if details is not None:
+                logger.info(f"[booking] 用 JSON API 数据(完整,含姓名)成功: {details.ticket_nos}")
+                page.remove_listener("response", _on_response)
+                return details
+        except Exception as e:
+            logger.warning(f"[booking] JSON 解析失败,fallback 到 HTML 解析: {e}")
 
     # debug_network 跑完,打所有 XHR URL
     if debug_network:
@@ -627,18 +655,200 @@ def fetch_booking_details(
         ticket_no=ticket_no,
         ticket_nos=ticket_nos,  # 2026-07-29: 多人订单全部票号
         pnr=pnr or "",
+        raw_json=None,  # HTML 解析路径没 JSON
     )
 
 
-# BookingDetails 容器(2026-07-27 加,2026-07-29 扩展支持多人订单)
+# ============================================================
+# JSON API 解析(2026-07-30 新): 从 /tRetailAPISolution/order/extract/{bookingId} 抓的 JSON
+# ============================================================
+
+# 状态映射(JSON 用的是 "OPEN_FOR_USE" / "FLOWN" / "REFUNDED" / "EXCHANGED" 这种英文)
+TICKET_STATUS_JSON_MAP = {
+    "OPEN_FOR_USE": "未使用",
+    "FLOWN": "已使用",
+    "USED": "已使用",
+    "REFUNDED": "已退票",
+    "EXCHANGED": "已改期",
+    "CHANGED": "已改期",
+    "VOID": "已作废",
+}
+
+
+def _parse_booking_from_json(data: dict, order_no: str) -> Optional["BookingDetails"]:
+    """从 /tRetailAPISolution/order/extract/ 的 JSON 响应解析订单(2026-07-30 新)
+
+    JSON 结构(用户 DevTools 实测):
+    - bookingId: UUID
+    - bookingReference: 订单号
+    - flightProducts[].tickets[]: { customerId, ticketNumber, ticketStatus }
+    - customers[]: { id, name: { firstName, surname, title }, ... }
+    - flightProducts[].flightBounds[].boundSegments[].flightSegment: 航班段信息
+    - flightProducts[].passengerCounts[]: { passengerType, count }
+    - contactDetails: { name, email, phones }
+    """
+    if not data or not isinstance(data, dict):
+        logger.warning(f"[booking] JSON 数据无效: {type(data)}")
+        return None
+
+    # 校验订单号匹配
+    ref = (data.get("bookingReference") or "").strip()
+    if ref and ref != order_no:
+        logger.warning(f"[booking] JSON 订单号 {ref} 与输入 {order_no} 不符,可能用了旧的 bookingId")
+        # 不直接失败,继续解析(可能 bookingId 复用了)
+
+    # 找主 flightProduct(通常只有一个)
+    flight_products = data.get("flightProducts") or []
+    if not flight_products:
+        logger.warning("[booking] JSON 里没有 flightProducts")
+        return None
+    fp = flight_products[0]
+
+    # 解析 tickets(按 customerId 去重保序)
+    tickets_raw = fp.get("tickets") or []
+    seen_cids = set()
+    pax_tickets: list[dict] = []  # [{customerId, ticketNumber, ticketStatus}]
+    for t in tickets_raw:
+        cid = t.get("customerId")
+        if cid in seen_cids:
+            continue  # 同一 customer 跨多段只记一次
+        seen_cids.add(cid)
+        pax_tickets.append({
+            "customer_id": cid,
+            "ticket_no": t.get("ticketNumber") or "",
+            "ticket_status": t.get("ticketStatus") or "",
+            "check_in_status": t.get("checkInStatus") or "",
+        })
+
+    # 解析 customers(乘机人)
+    customers_raw = data.get("customers") or []
+    customers_by_id: dict = {}
+    for c in customers_raw:
+        cid = c.get("id")
+        name = c.get("name") or {}
+        # 格式: ZHANG/SAN(RUI LIN 是名在前姓在后,正常是姓在前名在后;看 API 是怎么给的)
+        # 实际数据: title=MR, firstName=RUI, surname=LIN → 应该是 LIN/RUI
+        first = (name.get("firstName") or "").strip()
+        last = (name.get("surname") or "").strip()
+        title = (name.get("title") or "").strip()
+        full_name = f"{last}/{first}".strip("/") if last and first else (last or first or "")
+        if title:
+            full_name = f"{title} {full_name}".strip()
+        customers_by_id[cid] = {
+            "id": cid,
+            "name": full_name,
+            "first_name": first,
+            "last_name": last,
+            "title": title,
+            "passenger_type": c.get("passengerType") or "",
+            "date_of_birth": c.get("dateOfBirth") or "",
+            "nationality": c.get("nationality") or "",
+            "gender": c.get("gender") or "",
+            "doc_id": (c.get("travelDocument") or {}).get("docId") or "",
+            "doc_type": (c.get("travelDocument") or {}).get("docType") or "",
+        }
+
+    # 拼装: 每个乘机人带票号 + 状态
+    passengers: list[dict] = []
+    ticket_nos: list[str] = []
+    for pt in pax_tickets:
+        cid = pt["customer_id"]
+        cust = customers_by_id.get(cid, {})
+        ticket_no = pt["ticket_no"]
+        if ticket_no and ticket_no not in ticket_nos:
+            ticket_nos.append(ticket_no)
+        passengers.append({
+            "name": cust.get("name", ""),
+            "first_name": cust.get("first_name", ""),
+            "last_name": cust.get("last_name", ""),
+            "title": cust.get("title", ""),
+            "ticket_no": ticket_no,
+            "ticket_status": pt["ticket_status"],
+            "ticket_status_cn": TICKET_STATUS_JSON_MAP.get(pt["ticket_status"], pt["ticket_status"]),
+            "check_in_status": pt["check_in_status"],
+            "passenger_type": cust.get("passenger_type", ""),
+            "date_of_birth": cust.get("date_of_birth", ""),
+            "nationality": cust.get("nationality", ""),
+            "gender": cust.get("gender", ""),
+            "doc_id": cust.get("doc_id", ""),
+            "doc_type": cust.get("doc_type", ""),
+        })
+
+    if not passengers:
+        logger.warning("[booking] JSON 解析后没有任何乘客数据")
+        return None
+
+    # 取主要票状态(用第一个乘客的状态)
+    main_status = passengers[0]["ticket_status"]
+    main_status_cn = passengers[0]["ticket_status_cn"]
+    logger.info(f"[booking] JSON 解析: {len(passengers)} 个乘客,{len(ticket_nos)} 个票号,主状态 {main_status_cn}")
+
+    # 解析 PNR(reservationId,通常在 flightProduct 顶层)
+    pnr = fp.get("reservationId") or ""
+
+    # 解析航段(flightBounds)
+    flight_bounds = fp.get("flightBounds") or []
+    segments = []
+    for fb in flight_bounds:
+        for bs in (fb.get("boundSegments") or []):
+            seg = bs.get("flightSegment") or {}
+            if not seg:
+                continue
+            dep = seg.get("departure") or {}
+            arr = seg.get("arrival") or {}
+            op = seg.get("operatingAirlineInfo") or {}
+            segments.append({
+                "flight_no": f"{op.get('airlineCode','')}{op.get('flightNumber','')}",
+                "from": dep.get("iataCode", ""),
+                "from_name": dep.get("name", ""),
+                "to": arr.get("iataCode", ""),
+                "to_name": arr.get("name", ""),
+                "depart_time": dep.get("dateTime", ""),
+                "arrive_time": arr.get("dateTime", ""),  # boundSegments 简化版可能没单独到达时间
+                "duration": seg.get("duration", ""),
+                "cabin": (seg.get("equipmentType") or ""),
+            })
+
+    # 联系人
+    contact = data.get("contactDetails") or {}
+    contact_name_obj = contact.get("name") or {}
+    contact_name = (
+        f"{contact_name_obj.get('surname','')}/{contact_name_obj.get('firstName','')}".strip("/")
+    )
+    contact_phones = ", ".join(
+        (p.get("number") or "") for p in (contact.get("phones") or [])
+    )
+
+    return BookingDetails(
+        raw_status=main_status,
+        status=TicketStatus(main_status_cn) if main_status_cn in [s.value for s in TicketStatus] else TicketStatus.from_raw(main_status),
+        ticket_no=ticket_nos[0] if ticket_nos else "",
+        ticket_nos=ticket_nos,
+        pnr=pnr,
+        raw_json=data,
+        passengers=passengers,  # 2026-07-30: 完整乘客数据
+        segments=segments,      # 2026-07-30: 航段数据
+        contact_name=contact_name,
+        contact_phone=contact_phones,
+        booking_id=data.get("bookingId") or "",
+    )
+
+
+# BookingDetails 容器(2026-07-27 加,2026-07-29 扩展支持多人订单,2026-07-30 扩展支持 JSON API)
 @dataclass
 class BookingDetails:
-    """订单详情页解析结果"""
+    """订单详情页解析结果(优先来自 JSON API,fallback 来自 HTML 解析)"""
     raw_status: str
     status: TicketStatus
     ticket_no: str  # 第一个票号(兼容老 API)
     ticket_nos: list[str] = field(default_factory=list)  # 全部票号(多人订单)
     pnr: str = ""
+    raw_json: Optional[dict] = None  # 2026-07-30: 完整 JSON(从 /tRetailAPISolution/order/extract 抓的)
+    passengers: list[dict] = field(default_factory=list)  # 2026-07-30: 乘机人数据 [{name, ticket_no, ticket_status, ...}]
+    segments: list[dict] = field(default_factory=list)  # 2026-07-30: 航段数据
+    contact_name: str = ""  # 2026-07-30: 联系人
+    contact_phone: str = ""
+    booking_id: str = ""  # 2026-07-30: bookingId (UUID)
 
 
 # ============================================================
@@ -814,6 +1024,14 @@ def verify_ticket(
                 account_phone=account_phone,
                 took_ms=int((time.time() - t0) * 1000),
                 error="",
+                # 2026-07-30: 完整 JSON 数据(带乘机人/航段等)
+                raw_json=details.raw_json,
+                passengers=details.passengers,
+                segments=details.segments,
+                pnr=details.pnr,
+                contact_name=details.contact_name,
+                contact_phone=details.contact_phone,
+                booking_id=details.booking_id,
             )
     except SessionExpiredError as e:
         return VerifyResult(
