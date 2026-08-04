@@ -1,4 +1,5 @@
 """GQ 天空航司适配器（公网 Sabre 接口）"""
+import os
 import requests
 from .base import AirlineAdapter, FormField
 
@@ -14,8 +15,13 @@ class GQAdapter(AirlineAdapter):
         FormField("bookingLastName", label="姓", placeholder="如：LIU"),
     ]
 
-    # GQ 接口需要特殊 header (tenant + client version)
-    EXTRA_HEADERS = {
+    # GQ 接口需要特殊 header (tenant + client version + user identifier)
+    # 2026-08-04 改: 凭证走环境变量,过期只改 env var 不用改代码
+    #   GQ_TENANT_IDENTIFIER
+    #   GQ_USER_IDENTIFIER
+    #   GQ_CLIENT_VERSION  (默认 0.5.4016)
+    # 旧硬编码值作为兜底(代码里保留,凭证失效时只换 env var)
+    DEFAULT_EXTRA_HEADERS = {
         "Accept": "text/plain",
         "Accept-Encoding": "gzip, deflate, br, zstd",
         "Accept-Language": "zh-CN,zh;q=0.9",
@@ -27,6 +33,20 @@ class GQAdapter(AirlineAdapter):
         "x-useridentifier": "Lj6GYPaCPdRZggFWMqJitl6iUPsu7S",
     }
 
+    def _get_extra_headers(self) -> dict:
+        """从环境变量读凭证,缺则用默认值(2026-08-04 加)"""
+        env_tenant = os.environ.get("GQ_TENANT_IDENTIFIER", "").strip()
+        env_user = os.environ.get("GQ_USER_IDENTIFIER", "").strip()
+        env_client_ver = os.environ.get("GQ_CLIENT_VERSION", "").strip()
+        headers = dict(self.DEFAULT_EXTRA_HEADERS)
+        if env_tenant:
+            headers["tenant-identifier"] = env_tenant
+        if env_user:
+            headers["x-useridentifier"] = env_user
+        if env_client_ver:
+            headers["x-clientversion"] = env_client_ver
+        return headers
+
     def _call_api(self, form_data: dict):
         payload = {
             "confirmationNumber": form_data.get("confirmationNumber", "").strip().upper(),
@@ -35,13 +55,37 @@ class GQAdapter(AirlineAdapter):
         }
         headers = {
             "Content-Type": "application/json",
-            **self.EXTRA_HEADERS,
+            **self._get_extra_headers(),
         }
-        resp = requests.post(self.api_url, json=payload, headers=headers, timeout=self.timeout)
-        resp.raise_for_status()
-        return resp.json()
+        try:
+            resp = requests.post(self.api_url, json=payload, headers=headers, timeout=self.timeout)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.HTTPError as e:
+            # 2026-08-04 加: 401/403 时给明确错误,告诉用户凭证过期要换 env var
+            if resp.status_code in (401, 403):
+                return {
+                    "_error": (
+                        f"GQ 接口返回 {resp.status_code} Unauthorized — tenant-identifier / x-useridentifier 凭证过期\n"
+                        f"💡 修法: 找 IT 或 Sky Express 代理拿新凭证,设置环境变量:\n"
+                        f"   $env:GQ_TENANT_IDENTIFIER = '新值'\n"
+                        f"   $env:GQ_USER_IDENTIFIER  = '新值'\n"
+                        f"   $env:GQ_CLIENT_VERSION  = '新值'\n"
+                        f"或 Railway Variables 加同名 env var。"
+                    ),
+                    "_status": resp.status_code,
+                    "_body": resp.text[:500],
+                }
+            raise
 
     def _parse(self, raw) -> dict:
+        # 2026-08-04 加: 处理 _call_api 返回的错误 dict(401/403 等)
+        if isinstance(raw, dict) and raw.get("_error"):
+            return {
+                "success": False,
+                "error": raw["_error"],
+                "flight_info": raw,
+            }
         try:
             if not raw:
                 return {"success": False, "error": "未获取到有效数据"}
