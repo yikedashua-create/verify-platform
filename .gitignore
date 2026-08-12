@@ -15,6 +15,17 @@ env/
 # Test scripts (开发调试用,不入库)
 _test_*.py
 _test_*.txt
+_dump_*.py
+_dump_*.json
+_dump_*/
+_vn_dump*/
+_check_*.py
+_find_*.py
+_find_*.json
+
+# PyInstaller 构建产物 (2026-08-12 加)
+build/
+dist/
 
 # IDE
 .vscode/

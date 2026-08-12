@@ -48,16 +48,20 @@ for pkg_name in ['altair', 'pandas', 'numpy', 'requests', 'urllib3', 'certifi', 
 
 # 3. Playwright 浏览器二进制 (chromium + headless_shell + ffmpeg)
 # 路径: %LOCALAPPDATA%\ms-playwright\chromium-XXXX\chrome-win\
+# ⚠️ 2026-08-08 修复 ticket_generator.png 生成报错:
+#    Playwright p.chromium.launch() 默认走 chromium_headless_shell-XXXX
+#    (更小),只拷 chromium-XXXX 找不到,需要同时拷 chromium_headless_shell-XXXX
+#    main.py 启动时一次性解压到 %LOCALAPPDATA%\ms-playwright\ + 设环境变量
 import glob
 import os as _os
 playwright_browsers = _os.environ.get('LOCALAPPDATA', '') + r'\ms-playwright'
 if _os.path.isdir(playwright_browsers):
-    for chromium_dir in glob.glob(_os.path.join(playwright_browsers, 'chromium-*')):
-        if _os.path.isdir(chromium_dir):
-            # 拷贝整个 chromium 目录
-            target_name = _os.path.basename(chromium_dir)
-            datas.append((chromium_dir, target_name))
-            print(f"  [spec] Including Playwright chromium: {target_name}")
+    for browser_dir in glob.glob(_os.path.join(playwright_browsers, 'chromium*')):
+        # 匹配 chromium-XXXX 和 chromium_headless_shell-XXXX
+        if _os.path.isdir(browser_dir):
+            target_name = _os.path.basename(browser_dir)
+            datas.append((browser_dir, target_name))
+            print(f"  [spec] Including Playwright browser: {target_name}")
 
 # 4. collect streamlit/altair/etc 的数据
 from PyInstaller.utils.hooks import collect_data_files
@@ -158,7 +162,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['runtime_hook_pil.py'],  # 2026-08-10 PIL lazy __init__ 修复
     excludes=[
         # 排除大库 / 跟项目无关的库,加速 build + 减体积
         # 只排除第三方库,别排除标准库(asyncio / concurrent / tkinter 等是必需的!)
@@ -172,7 +176,10 @@ a = Analysis(
         'matplotlib',
         'plotly',
         'pandas',  # 我们没直接用 pandas
-        'PIL',
+        # ⚠️ 2026-08-10 不能再 exclude PIL!
+        # streamlit st.image() 内部要 PIL 解析图片
+        # 之前排除导致 "ModuleNotFoundError: No module named 'PIL'"
+        # 'PIL',
         'cv2',
         'IPython',
         'notebook',
@@ -213,7 +220,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='客票验真',
+    name='客票验真',  # 2026-08-12 release 用这个名字 (auto_updater 对比 latest release asset 名字)
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

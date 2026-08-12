@@ -8,7 +8,6 @@ ddddocr>=1.5
 onnxruntime>=1.15
 pyyaml>=6.0
 loguru>=0.7
-# === 2026-07-28 LJ Jin Air 接入(cloudscraper 绕过 Cloudflare) ===
-cloudscraper>=1.2.71
-# === 2026-07-28 LJ 加 playwright-stealth 伪装浏览器过 Managed Challenge ===
+# === 2026-07-28 LJ Jin Air 接入(playwright-stealth 伪装浏览器过 Cloudflare Managed Challenge) ===
+# cloudscraper 已弃用(2026-07-29): 单凭 TLS 指纹伪装过不了 Managed Challenge,改走真 Chrome + stealth
 playwright-stealth>=1.0.0

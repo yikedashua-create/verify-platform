@@ -18,6 +18,7 @@ OFFICIAL_VERIFY_URLS: dict = {
     "dd": "https://booking.nokair.com/zh/manage",
     "od": "https://www.bookcabin.com/manage-bookings",
     "lj": "https://www.jinair.com/booking/index",
+    "vn": "https://www.vietnamairlines.com/cn/zh/check-in-and-manage/manage-booking",
     # 剩 HX / MF 还没填
     # "hx": "https://...",
     # "mf": "https://...",

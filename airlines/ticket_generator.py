@@ -64,6 +64,15 @@ def extract_field(data: dict, keys: list) -> str:
         if key in ["issueDate", "bookingDate", "bookedDate"]:
             if nested.get("ticketIssueDt"):
                 return str(nested["ticketIssueDt"])[:19].replace("T", " ")
+        # VN 越南航空 (2026-08-11): data.data.reservation.pnrCode / issuedUtcDate
+        vn_nested_data = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
+        vn_nested_res = vn_nested_data.get("reservation", {}) if isinstance(vn_nested_data.get("reservation"), dict) else {}
+        if key in ["confirmationNumber", "bookingPNR", "airlinePNR", "recordLocator", "bookingPnr", "confirmation"]:
+            if vn_nested_res.get("pnrCode"):
+                return vn_nested_res["pnrCode"]
+        if key in ["issueDate", "bookingDate", "bookedDate"]:
+            if vn_nested_res.get("issuedUtcDate"):
+                return str(vn_nested_res["issuedUtcDate"])[:19].replace("T", " ")
     return "N/A"
 
 
@@ -90,6 +99,27 @@ def extract_passengers(data: dict) -> list:
     """提取乘客列表,统一成 {surname, givenName, idNumber, pax_type, eticketNo}"""
     if not isinstance(data, dict):
         return []
+
+    # VN 越南航空: data.data.reservation.passengers[] (2026-08-11 新增)
+    # VN adapter 的 flight_info 结构: {"success": true, "code": "0", "data": {"reservation": {..., "passengers": [...]}}}
+    vn_data = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
+    vn_res = vn_data.get("reservation", {}) if isinstance(vn_data.get("reservation"), dict) else {}
+    if vn_res.get("passengers"):
+        result = []
+        for pax in vn_res["passengers"]:
+            if not isinstance(pax, dict):
+                continue
+            ticket_doc = pax.get("ticketDocument") or {}
+            eticket = pax.get("ticketNumber") or ticket_doc.get("ticketNumber") or "N/A"
+            result.append({
+                "surname": (pax.get("lastName") or "N/A").upper(),
+                "givenName": (pax.get("firstName") or "N/A").upper(),
+                "idNumber": pax.get("dateOfBirth") or "",  # VN 没 document 字段, 用 DOB 占位
+                "pax_type": pax.get("passengerTypeCode", "ADT"),
+                "eticketNo": eticket,
+            })
+        if result:
+            return result
 
     # 9C 春秋: 顶层 uesrName 特殊
     if "uesrName" in data:
@@ -316,6 +346,33 @@ def extract_flights(data: dict) -> list:
                     "status": "OK",
                 })
         return flights
+
+    # VN 越南航空: data.data.reservation.originDestinationOptions[].flightSegments[] (2026-08-11 新增)
+    vn_flights_data = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
+    vn_res = vn_flights_data.get("reservation", {}) if isinstance(vn_flights_data.get("reservation"), dict) else {}
+    if vn_res.get("originDestinationOptions"):
+        for opt in vn_res["originDestinationOptions"]:
+            for seg in opt.get("flightSegments", []):
+                if not isinstance(seg, dict):
+                    continue
+                dep_dt = str(seg.get("departureDateTime", ""))
+                arr_dt = str(seg.get("arrivalDateTime", ""))
+                dep_date = dep_dt.split("T")[0] if "T" in dep_dt else dep_dt[:10]
+                dep_time = dep_dt.split("T")[1][:5] if "T" in dep_dt else ""
+                arr_time = arr_dt.split("T")[1][:5] if "T" in arr_dt else ""
+                flights.append({
+                    "flightNumber": seg.get("flightNumber", "N/A"),
+                    "airlineCode": seg.get("marketingAirlineCode", "VN"),
+                    "origin": seg.get("departureLocationCode", "N/A"),
+                    "destination": seg.get("arrivalLocationCode", "N/A"),
+                    "departureDate": dep_date,
+                    "departureTime": dep_time,
+                    "arrivalTime": arr_time,
+                    "cabin": seg.get("classOfService", "N/A"),
+                    "status": "USED" if seg.get("flown") or seg.get("segmentUsed") else "OK",
+                })
+        if flights:
+            return flights
 
     # DD 泰国皇雀: data.flights[].legs[] (carrierCode/flightNumber 在 flight 顶层,cabin 在 passengers)
     if isinstance(data.get("data"), dict) and data["data"].get("flights"):
