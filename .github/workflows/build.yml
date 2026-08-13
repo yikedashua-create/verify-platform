@@ -11,6 +11,11 @@ on:
         required: false
         default: 'manual'
 
+# 2026-08-13 修复: 默认 GITHUB_TOKEN 是只读的, softprops/action-gh-release@v2 创建
+# release 需要 contents: write 权限. 之前 #7 失败 = "Resource not accessible by integration".
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
