@@ -8,6 +8,32 @@ import sys
 import os
 from pathlib import Path
 
+# 2026-08-12 GitHub Actions runner 修复: stdout 默认 cp1252,build.spec 里 print 中文
+# 直接 UnicodeEncodeError。强制 reconfigure utf-8 (errors='replace' 兜底异常字符)
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
+# 2026-08-12 GitHub Actions runner 修复: 跨平台 site-packages 路径
+# 之前 hardcoded `D:\pycharm3\.venv\Lib\site-packages\...` 在 CI runner 上不存在
+# runner 实际路径: C:\hostedtoolcache\windows\Python\3.11.9\x64\Lib\site-packages\
+# 用 site.getsitepackages() 一次拿全
+import site as _site
+_SITE_PACKAGES_DIRS = [p for p in _site.getsitepackages() if os.path.isdir(p)]
+# 兜底: 直接从 sys.executable parent 推 (venv 结构: Scripts/python.exe + Lib/site-packages/)
+if not _SITE_PACKAGES_DIRS:
+    _exe_parent = os.path.dirname(sys.executable)
+    for cand in [
+        os.path.join(_exe_parent, 'Lib', 'site-packages'),         # Windows venv
+        os.path.join(_exe_parent, 'lib', 'python3.11', 'site-packages'),  # Linux
+        os.path.join(_exe_parent, '..', 'Lib', 'site-packages'),    # Windows 相对
+    ]:
+        if os.path.isdir(cand):
+            _SITE_PACKAGES_DIRS.append(os.path.abspath(cand))
+            break
+
 block_cipher = None
 
 # ============================
@@ -32,19 +58,20 @@ if Path('.streamlit').exists():
 # 3. streamlit 的 dist-info (importlib.metadata 需要!)
 # 否则 streamlit/version.py 调 importlib.metadata.version('streamlit') 会报错
 import glob
-for dist_info in glob.glob(r'D:\pycharm3\.venv\Lib\site-packages\streamlit-*.dist-info'):
-    target = os.path.basename(dist_info)
-    datas.append((dist_info, target))
-    print(f"  [spec] Including streamlit dist-info: {target}")
+for _sp in _SITE_PACKAGES_DIRS:
+    for dist_info in glob.glob(os.path.join(_sp, 'streamlit-*.dist-info')):
+        target = os.path.basename(dist_info)
+        datas.append((dist_info, target))
+        print(f"  [spec] Including streamlit dist-info: {target}")
 
 # 4. 其他依赖的 dist-info (有些库也用 importlib.metadata)
 for pkg_name in ['altair', 'pandas', 'numpy', 'requests', 'urllib3', 'certifi', 'packaging', 'toml', 'Jinja2', 'MarkupSafe', 'pyarrow']:
-    matches = glob.glob(rf'D:\pycharm3\.venv\Lib\site-packages\{pkg_name}-*.dist-info')
-    for m in matches:
-        target = os.path.basename(m)
-        if not any(d[1] == target for d in datas):
-            datas.append((m, target))
-            print(f"  [spec] Including {target}")
+    for _sp in _SITE_PACKAGES_DIRS:
+        for m in glob.glob(os.path.join(_sp, f'{pkg_name}-*.dist-info')):
+            target = os.path.basename(m)
+            if not any(d[1] == target for d in datas):
+                datas.append((m, target))
+                print(f"  [spec] Including {target}")
 
 # 3. Playwright 浏览器二进制 (chromium + headless_shell + ffmpeg)
 # 路径: %LOCALAPPDATA%\ms-playwright\chromium-XXXX\chrome-win\

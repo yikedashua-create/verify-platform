@@ -39,11 +39,18 @@ jobs:
       - name: Build with PyInstaller
         env:
           APP_VERSION: ${{ github.ref_name }}
+          # 2026-08-12 修复: GitHub Actions Windows runner 默认 stdout 是 cp1252,
+          # build.spec 里 print 中文会 UnicodeEncodeError。强制 utf-8。
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: '1'
         run: |
+          chcp 65001 | Out-Null
+          $env:PYTHONIOENCODING = 'utf-8'
           pyinstaller build.spec --clean --noconfirm
 
       - name: Verify .exe exists
         run: |
+          chcp 65001 | Out-Null
           Get-Item dist/客票验真.exe
           if ((Get-Item dist/客票验真.exe).Length -lt 50MB) {
             Write-Error "Build size too small - probably failed"
