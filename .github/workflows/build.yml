@@ -64,23 +64,17 @@ jobs:
 
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        # 2026-08-13 切 ncipollo/release-action@v1: 之前 softprops/action-gh-release@v2
+        # 跟中文文件名 + Windows runner 有兼容性问题, 458MB exe 上传后变 245MB default.exe.
+        # ncipollo 用 GitHub API 直传 (不走 S3 multipart), 兼容性更稳.
+        uses: ncipollo/release-action@v1
         with:
-          files: |
-            dist/客票验真.exe
-          body: |
-            ## 客票验真平台 v${{ github.ref_name }}
-
-            [下载 客票验真.exe](./客票验真.exe) (Windows 10/11)
-
-            ### 安装方法
-            1. 下载 `客票验真.exe`
-            2. 双击运行,自动开浏览器
-            3. 第一次启动会装环境(约 1-2 分钟)
-            4. 后续启动秒开
-
-            ### 升级方法
-            重新下载新版 .exe 替换即可,自动检查更新也会提示。
+          artifacts: "dist/客票验真.exe"
+          tag: ${{ github.ref_name }}
+          artifactErrorsFailBuild: true
+          omitBody: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload artifact (manual build)
         if: github.event_name == 'workflow_dispatch'
