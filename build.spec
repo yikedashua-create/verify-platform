@@ -247,7 +247,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='客票验真',  # 2026-08-12 release 用这个名字 (auto_updater 对比 latest release asset 名字)
+    name='verify-platform',  # 2026-08-16 改 ASCII: GitHub Release UI "Attach binaries" 不保留中文文件名, 强制改 'default', 触发 auto_updater asset name mismatch 警告. 改 ASCII 后 .exe 干净, 用户下载也清晰.
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -61,8 +61,8 @@ jobs:
       - name: Verify .exe exists
         run: |
           chcp 65001 | Out-Null
-          Get-Item dist/客票验真.exe
-          if ((Get-Item dist/客票验真.exe).Length -lt 50MB) {
+          Get-Item dist/verify-platform.exe
+          if ((Get-Item dist/verify-platform.exe).Length -lt 50MB) {
             Write-Error "Build size too small - probably failed"
             exit 1
           }
@@ -72,9 +72,11 @@ jobs:
         # 2026-08-13 切 ncipollo/release-action@v1: 之前 softprops/action-gh-release@v2
         # 跟中文文件名 + Windows runner 有兼容性问题, 458MB exe 上传后变 245MB default.exe.
         # ncipollo 用 GitHub API 直传 (不走 S3 multipart), 兼容性更稳.
+        # 2026-08-16 加 ASCII 名 (verify-platform.exe): GitHub UI "Attach binaries"
+        # 不保留中文文件名强制 default, 改 ASCII 后 release asset 名字干净.
         uses: ncipollo/release-action@v1
         with:
-          artifacts: "dist/客票验真.exe"
+          artifacts: "dist/verify-platform.exe"
           tag: ${{ github.ref_name }}
           artifactErrorsFailBuild: true
           omitBody: true
@@ -85,6 +87,6 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: 客票验真-${{ github.ref_name }}
-          path: dist/客票验真.exe
+          name: verify-platform-${{ github.ref_name }}
+          path: dist/verify-platform.exe
           retention-days: 30
