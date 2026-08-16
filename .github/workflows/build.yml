@@ -37,8 +37,13 @@ jobs:
           pip install pyinstaller
 
       - name: Install Playwright chromium
+        # 2026-08-16 修: 之前只装 chromium 完整版, 没装 chromium-headless-shell
+        # spec glob('chromium*') 匹配到 1 个 (chromium-1217) 而不是 2 个
+        # → exe 少 213MB (245MB vs 458MB expected)
+        # 本地 build 458MB 是因为开发机已经装过 headless_shell, CI fresh runner 没有
         run: |
           playwright install chromium
+          playwright install chromium-headless-shell
           playwright install-deps chromium
 
       - name: Build with PyInstaller
