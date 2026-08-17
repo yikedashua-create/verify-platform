@@ -99,6 +99,9 @@ if _update:
             clear_update_info()
             st.rerun()
 
+# 当前版本 (2026-08-17 加, 侧栏底部小字, 让用户知道自己在跑哪个版本)
+st.sidebar.caption(f"📦 当前版本 v{os.environ.get('APP_VERSION', 'dev')}")
+
 # 自定义 CSS
 st.markdown("""
 <style>
