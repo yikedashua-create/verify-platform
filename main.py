@@ -158,7 +158,63 @@ def prepare_streamlit_env():
             sys.path.insert(0, str(BUNDLE_DIR))
 
 
+def run_update_helper(old_path: str, new_path: str):
+    """Helper 模式 (2026-08-17 加): app.py 触发一键更新时 spawn 的辅助进程
+    流程: 等旧 exe 完全退出 → 删旧 exe → 把新 exe rename 到旧路径 → 启动新 exe → 退出
+
+    为什么需要独立进程: Windows 不允许修改/删除正在运行的 exe
+    必须先退出旧 exe (释放文件句柄) 才能替换
+    """
+    import shutil
+    print(f"[update-helper] PID={os.getpid()}, parent={os.getppid()}")
+    print(f"[update-helper] Old: {old_path}")
+    print(f"[update-helper] New: {new_path}")
+
+    # 等 5 秒让旧 Streamlit 完全退出 (os._exit 不走 atexit 清理,文件句柄立即释放)
+    print("[update-helper] waiting 5s for parent Streamlit to exit...")
+    time.sleep(5)
+
+    # 删旧 exe (重试 30 次, Windows 文件锁释放有时慢)
+    for i in range(30):
+        try:
+            if os.path.exists(old_path):
+                os.remove(old_path)
+            print(f"[update-helper] old exe removed")
+            break
+        except OSError as e:
+            print(f"[update-helper] remove retry {i+1}/30: {e}")
+            time.sleep(1)
+    else:
+        print(f"[update-helper] FAILED to remove old exe after 30 retries")
+        sys.exit(1)
+
+    # 把新 exe rename 到旧 exe 路径
+    try:
+        os.rename(new_path, old_path)
+        print(f"[update-helper] renamed new -> old")
+    except OSError as e:
+        # 兜底: copy + remove
+        print(f"[update-helper] rename failed: {e}, trying copy+remove...")
+        shutil.copy2(new_path, old_path)
+        try:
+            os.remove(new_path)
+        except OSError:
+            pass
+
+    # 启动新 exe
+    print(f"[update-helper] launching new exe: {old_path}")
+    subprocess.Popen([old_path], close_fds=True)
+    print(f"[update-helper] done, exiting")
+
+
 def main():
+    # 2026-08-17 加: helper 模式分发
+    # app.py 触发一键更新时 spawn 这个 process 来做 exe 替换
+    # 模式: verify-platform.exe --_do_update <old_path> <new_path>
+    if len(sys.argv) >= 4 and sys.argv[1] == '--_do_update':
+        run_update_helper(sys.argv[2], sys.argv[3])
+        return
+
     print("=" * 60)
     print("  Verify Platform  -  客票验真平台")
     print(f"  v{os.environ.get('APP_VERSION', '1.0.0')}  (c) 2026")

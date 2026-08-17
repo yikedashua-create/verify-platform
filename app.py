@@ -14,6 +14,58 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from airlines import get_adapter, list_airlines
 from airlines.ticket_generator import generate_ticket_images
 
+def do_self_update(update_info: dict):
+    """一键自更新 (2026-08-17 加):
+    1. 下载新 exe 到 %TEMP%
+    2. spawn detached helper 进程 (verify-platform.exe --_do_update)
+    3. 当前 Streamlit 立即 os._exit 退出,文件句柄释放
+    4. helper 等 5s → 删旧 exe → rename 新 → 启动新 exe
+    """
+    import subprocess
+    import tempfile
+    import urllib.request
+    import time
+
+    url = update_info['url']
+    current_exe = sys.executable  # PyInstaller onefile 时 = .exe 路径
+    new_exe_temp = os.path.join(tempfile.gettempdir(), "verify-platform-update.exe")
+
+    progress = st.progress(0)
+    status = st.empty()
+
+    try:
+        status.text("⏳ 正在下载新版本...")
+
+        def report(count, block_size, total_size):
+            if total_size > 0:
+                pct = min(100, int(count * block_size * 100 / total_size))
+                progress.progress(pct / 100)
+
+        urllib.request.urlretrieve(url, new_exe_temp, reporthook=report)
+        progress.progress(100)
+        status.text("✅ 下载完成, 准备重启...")
+
+        # spawn helper: 当前 exe 用 --_do_update 标志重新启动
+        # 0x00000008 = DETACHED_PROCESS (独立, 不依附父进程 console)
+        # 0x00000200 = CREATE_NEW_PROCESS_GROUP (Ctrl+C 不传播)
+        creation_flags = 0x00000008 | 0x00000200
+        subprocess.Popen(
+            [current_exe, '--_do_update', current_exe, new_exe_temp],
+            creationflags=creation_flags,
+            close_fds=True,
+        )
+
+        time.sleep(2)
+        status.text("🚀 即将关闭并启动新版本 (浏览器会自动重连)...")
+        time.sleep(1)
+
+        # 立即退出, 不走 atexit 清理 (文件句柄立即释放, helper 5s 后能删旧 exe)
+        os._exit(0)
+    except Exception as e:
+        status.text(f"❌ 更新失败: {e}")
+        progress.empty()
+
+
 st.set_page_config(
     page_title="客票验真平台",
     page_icon="🎫",
@@ -31,8 +83,15 @@ if _update:
     with st.sidebar.container(border=True):
         st.markdown(f"### 🆕 新版本 v{_update['latest']} 可用")
         st.caption(f"当前 v{_update.get('current', '?')} · 新版 {_update['size_mb']} MB")
+
+        # 2026-08-17 加一键自更新
+        # 在 PyInstaller onefile 模式 (sys.frozen) 下能直接替换当前 exe
+        # 开发模式 (sys.frozen=False) 只能下载,不能自更新 (没有 .exe 路径)
+        if getattr(sys, 'frozen', False):
+            if st.button("🔄 立即更新并重启", use_container_width=True, type="primary", key="do_update"):
+                do_self_update(_update)
         st.link_button(
-            "⬇️ 立即下载新版本",
+            "⬇️ 仅下载 (zip)" if getattr(sys, 'frozen', False) else "⬇️ 立即下载新版本",
             _update["url"],
             use_container_width=True,
         )
