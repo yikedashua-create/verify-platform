@@ -11,12 +11,19 @@ import tempfile
 import urllib.request
 import urllib.error
 
+# 2026-08-17 改: 从 app_version helper 读真实版本
+# 之前直接 os.environ.get 在 exe 模式下永远拿到 "dev" (PyInstaller 不会烤 env 进 exe)
+try:
+    from app_version import APP_VERSION as _BAKED_VERSION
+except Exception:
+    _BAKED_VERSION = None
+
 # GitHub repo (公开的,private 也行 - GitHub API 默认匿名访问 public 没问题)
 GITHUB_API_URL = "https://api.github.com/repos/yikedashua-create/verify-platform/releases/latest"
 UPDATE_FILE = os.path.join(tempfile.gettempdir(), "verify-platform-update.json")
 
-# 当前版本 - 由 GitHub Actions 注入(开发模式用 "dev")
-CURRENT_VERSION = os.environ.get("APP_VERSION", "dev")
+# 当前版本 - 优先级: 嵌入文件 > env var > dev
+CURRENT_VERSION = _BAKED_VERSION or os.environ.get("APP_VERSION", "dev")
 
 
 def parse_version(v: str):

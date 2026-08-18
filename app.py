@@ -74,9 +74,12 @@ st.set_page_config(
 )
 
 # 自动更新提示(后台线程写到临时文件,这里读)
+# 2026-08-17 改: dev 模式不弹提示
+# 原因: dev 跑的是源码,自更新按钮被 sys.frozen=False 屏蔽,提示只会误导
+# 同事 exe 模式才需要看到(且自更新按钮可用)
 try:
     from auto_updater import read_update_info, clear_update_info
-    _update = read_update_info()
+    _update = read_update_info() if getattr(sys, 'frozen', False) else None
 except Exception:
     _update = None
 if _update:
@@ -100,7 +103,12 @@ if _update:
             st.rerun()
 
 # 当前版本 (2026-08-17 加, 侧栏底部小字, 让用户知道自己在跑哪个版本)
-st.sidebar.caption(f"📦 当前版本 v{os.environ.get('APP_VERSION', 'dev')}")
+# 2026-08-17 改: 从 app_version helper 读真实版本
+try:
+    from app_version import APP_VERSION as _SIDEBAR_VERSION
+except Exception:
+    _SIDEBAR_VERSION = os.environ.get("APP_VERSION", "dev")
+st.sidebar.caption(f"📦 当前版本 v{_SIDEBAR_VERSION}")
 
 # 自定义 CSS
 st.markdown("""

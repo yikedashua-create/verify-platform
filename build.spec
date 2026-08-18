@@ -8,6 +8,19 @@ import sys
 import os
 from pathlib import Path
 
+# 2026-08-17 修: build.yml 传 APP_VERSION 给 PyInstaller step,
+# 但 PyInstaller 不会把 env 烤进 exe (env 是 runtime 的,不是 build 时的)
+# → 同事跑 v1.0.4 的 exe 时 os.environ.get("APP_VERSION", "dev") 永远拿到 "dev"
+# 修法: build 时把 APP_VERSION 写进 _embedded/version.txt,
+#       runtime 从 sys._MEIPASS/_embedded/version.txt 读真实版本
+APP_VERSION = os.environ.get("APP_VERSION", "dev").strip()
+_EMBEDDED_DIR = os.path.join(os.path.dirname(SPEC), "_embedded")
+os.makedirs(_EMBEDDED_DIR, exist_ok=True)
+_VERSION_TXT = os.path.join(_EMBEDDED_DIR, "version.txt")
+with open(_VERSION_TXT, "w", encoding="utf-8") as _f:
+    _f.write(APP_VERSION)
+print(f"  [spec] Baked APP_VERSION = {APP_VERSION}  ->  {_VERSION_TXT}")
+
 # 2026-08-12 GitHub Actions runner 修复: stdout 默认 cp1252,build.spec 里 print 中文
 # 直接 UnicodeEncodeError。强制 reconfigure utf-8 (errors='replace' 兜底异常字符)
 try:
@@ -95,6 +108,9 @@ from PyInstaller.utils.hooks import collect_data_files
 datas += collect_data_files('streamlit', include_py_files=False)
 datas += collect_data_files('altair')
 datas += collect_data_files('plotly')
+
+# 5. 嵌入版本号文件 (2026-08-17 加, runtime 从 sys._MEIPASS/_embedded/version.txt 读)
+datas.append((_VERSION_TXT, "_embedded"))
 
 # ============================
 # 隐藏 import

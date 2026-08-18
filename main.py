@@ -217,7 +217,12 @@ def main():
 
     print("=" * 60)
     print("  Verify Platform  -  客票验真平台")
-    print(f"  v{os.environ.get('APP_VERSION', '1.0.0')}  (c) 2026")
+    # 2026-08-17 改: 从 app_version helper 读真实版本 (之前 env var 在 exe 模式下永远 dev)
+    try:
+        from app_version import APP_VERSION as _VERSION
+    except Exception:
+        _VERSION = os.environ.get("APP_VERSION", "1.0.0")
+    print(f"  v{_VERSION}  (c) 2026")
     print("=" * 60)
     print()
     print(f"  Bundle: {BUNDLE_DIR}")
