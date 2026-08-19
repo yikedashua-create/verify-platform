@@ -325,10 +325,20 @@ class MFAdapter(AirlineAdapter):
                 _save_password_for_phone(account_phone, password)
             return self._convert_xm_mf_result(result)
         except Exception as e:
+            # 2026-08-19 修: 异常 path 也要返 _xm_mf_result, 否则 _parse 误走内网 API 模式
+            # 把异常信息包装成 _xm_mf_result, 让 _parse_xm_mf_result 接管, 显示真实错误
+            err_msg = f"xm-mf-ticket-verify 异常: {type(e).__name__}: {e}"
+            err_tb = traceback.format_exc()
             return {
                 "return_code": "FAIL",
-                "return_msg": f"xm-mf-ticket-verify 异常: {type(e).__name__}: {e}",
-                "_traceback": traceback.format_exc(),
+                "return_msg": err_msg,
+                "_xm_mf_result": {
+                    "error": err_msg,
+                    "traceback": err_tb,
+                    "order_no": form_data.get("orderNo", "").strip(),
+                    "account_phone": form_data.get("accountPhone", "").strip(),
+                },
+                "_traceback": err_tb,
             }
 
     def _convert_xm_mf_result(self, result) -> dict:
@@ -437,7 +447,14 @@ class MFAdapter(AirlineAdapter):
 
             data_list = raw.get("data", [])
             if not data_list:
-                return {"success": False, "error": "未找到发票信息"}
+                # 2026-08-19 改: 把 return_code/return_msg 带上, 否则用户看不到真实原因
+                return_code = raw.get("return_code", "N/A")
+                return_msg = raw.get("return_msg", "N/A")
+                return {
+                    "success": False,
+                    "error": f"未找到发票信息 (return_code={return_code}, return_msg={return_msg})",
+                    "raw": raw,
+                }
 
             for idx, item in enumerate(data_list):
                 output.append("")
